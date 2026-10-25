@@ -1,0 +1,6 @@
+{
+  "name": "Universal Video Downloader — Windows Desktop Edition",
+  "description": "Production Windows desktop media extraction, format inspection, FFmpeg stream merging, and download management workstation built with Electron, React, TypeScript, yt-dlp, FFmpeg, and SQLite.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

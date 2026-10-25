@@ -1,0 +1,48 @@
+appId: com.universalvideodownloader.desktop
+productName: Universal Video Downloader
+copyright: Copyright © 2026 Universal Video Downloader Contributors
+
+directories:
+  buildResources: resources
+  output: release
+
+asar: true
+asarUnpack:
+  - "**/*.node"
+
+files:
+  - dist/**/*
+  - dist-electron/**/*
+  - package.json
+
+extraResources:
+  - from: resources/binaries
+    to: binaries
+    filter:
+      - "**/*"
+  - from: resources/licenses
+    to: licenses
+    filter:
+      - "**/*"
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+  icon: resources/icons/icon.ico
+  artifactName: "${productName}-${version}-win-${arch}.${ext}"
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Universal Video Downloader
+
+portable:
+  artifactName: "${productName}-${version}-win-${arch}-portable.${ext}"
