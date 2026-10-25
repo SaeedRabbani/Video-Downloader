@@ -1,4 +1,5 @@
 import { app, BrowserWindow, Menu } from 'electron';
+import fs from 'node:fs';
 import path from 'node:path';
 import { registerElectronIpcHandlers } from './ipc/handlers';
 import { AppBackendContainer } from './services/appContainer';
@@ -6,6 +7,22 @@ import { createMainWindow } from './windows/mainWindow';
 
 let mainWindow: BrowserWindow | null = null;
 let backendContainer: AppBackendContainer | null = null;
+
+function resolvePreloadScriptPath(): string {
+  const cjsCandidate = path.join(__dirname, '../preload/index.cjs');
+  if (fs.existsSync(cjsCandidate)) {
+    return cjsCandidate;
+  }
+  return path.join(__dirname, '../preload/index.js');
+}
+
+function resolveRendererHtmlPath(): string {
+  const relativeDist = path.join(__dirname, '../../dist/index.html');
+  if (fs.existsSync(relativeDist)) {
+    return relativeDist;
+  }
+  return path.join(app.getAppPath(), 'dist/index.html');
+}
 
 async function bootstrapElectronApp(): Promise<void> {
   await app.whenReady();
@@ -22,13 +39,18 @@ async function bootstrapElectronApp(): Promise<void> {
     startEmbeddedMediaServer: true,
   });
 
-  await backendContainer.initialize();
-
+  // Register IPC handlers immediately so the renderer never encounters missing channels
   registerElectronIpcHandlers(backendContainer, () => mainWindow);
 
-  const preloadPath = path.join(__dirname, '../preload/index.js');
+  try {
+    await backendContainer.initialize();
+  } catch (err) {
+    console.error('Non-fatal backend container initialization warning:', err);
+  }
+
+  const preloadPath = resolvePreloadScriptPath();
   const devServerUrl = process.env.VITE_DEV_SERVER_URL;
-  const rendererTarget = devServerUrl || path.join(__dirname, '../../dist/index.html');
+  const rendererTarget = devServerUrl || resolveRendererHtmlPath();
 
   mainWindow = createMainWindow(preloadPath, rendererTarget);
 

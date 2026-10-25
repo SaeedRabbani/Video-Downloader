@@ -10,6 +10,7 @@ const execFileAsync = promisify(execFile);
 export class BinaryManager {
   private cachedReport: BinaryStatusReport | null = null;
   private readonly resourceDirs: string[];
+  private readonly writableBootstrapDir: string;
 
   constructor(customResourceDir?: string) {
     const dirs: string[] = [];
@@ -21,8 +22,10 @@ export class BinaryManager {
       dirs.push(path.join(procWithResources.resourcesPath, 'binaries'));
       dirs.push(procWithResources.resourcesPath);
     }
-    dirs.push(path.resolve(process.cwd(), 'resources', 'binaries'));
+    const workspaceBinDir = path.resolve(process.cwd(), 'resources', 'binaries');
+    dirs.push(workspaceBinDir);
     this.resourceDirs = dirs;
+    this.writableBootstrapDir = customResourceDir || workspaceBinDir;
   }
 
   public resolveBinaryCandidatePaths(
@@ -120,7 +123,7 @@ export class BinaryManager {
 
   private async tryBootstrapYtDlpBinary(): Promise<string | null> {
     try {
-      const targetDir = this.resourceDirs[this.resourceDirs.length - 1];
+      const targetDir = this.writableBootstrapDir;
       fs.mkdirSync(targetDir, { recursive: true });
       const isWin = process.platform === 'win32';
       const fileName = isWin ? 'yt-dlp.exe' : 'yt-dlp';

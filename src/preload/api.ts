@@ -28,6 +28,7 @@ export interface ElectronPreloadApi {
   openFolder(filePathOrDir: string): Promise<{ opened: boolean }>;
   selectDirectory(): Promise<string | null>;
   selectCookiesFile(): Promise<string | null>;
+  getAvailableDirectories(): Promise<string[]>;
   getSettings(): Promise<AppSettings>;
   updateSettings(partial: Partial<AppSettings>): Promise<AppSettings>;
   getBinaryStatus(): Promise<BinaryStatusReport>;

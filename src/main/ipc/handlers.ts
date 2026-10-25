@@ -167,6 +167,12 @@ export function registerElectronIpcHandlers(
     return chosenFile;
   });
 
+  handleSecure(IPC_CHANNELS.GET_AVAILABLE_DIRECTORIES, async () => {
+    const current = container.repositories.getSettings().defaultDownloadDir;
+    const dirs = new Set<string>([current, container.downloadsDir]);
+    return Array.from(dirs).filter(Boolean);
+  });
+
   handleSecure(IPC_CHANNELS.GET_SETTINGS, async () => {
     return container.repositories.getSettings();
   });

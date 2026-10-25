@@ -175,6 +175,13 @@ class DualModeIpcClient implements ElectronPreloadApi {
   }
 
   public async getAvailableDirectories(): Promise<string[]> {
+    if (this.nativeBridge) {
+      if (typeof this.nativeBridge.getAvailableDirectories === 'function') {
+        return this.nativeBridge.getAvailableDirectories();
+      }
+      const settings = await this.nativeBridge.getSettings();
+      return settings?.defaultDownloadDir ? [settings.defaultDownloadDir] : [];
+    }
     return apiRequest<string[]>('/api/settings/directories');
   }
 

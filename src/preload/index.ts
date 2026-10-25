@@ -29,6 +29,7 @@ const electronAPI: ElectronPreloadApi = {
     ipcRenderer.invoke(IPC_CHANNELS.OPEN_FOLDER, filePathOrDir),
   selectDirectory: () => ipcRenderer.invoke(IPC_CHANNELS.SELECT_DIRECTORY),
   selectCookiesFile: () => ipcRenderer.invoke(IPC_CHANNELS.SELECT_COOKIES_FILE),
+  getAvailableDirectories: () => ipcRenderer.invoke(IPC_CHANNELS.GET_AVAILABLE_DIRECTORIES),
   getSettings: () => ipcRenderer.invoke(IPC_CHANNELS.GET_SETTINGS),
   updateSettings: (partial: Partial<AppSettings>) =>
     ipcRenderer.invoke(IPC_CHANNELS.UPDATE_SETTINGS, partial),

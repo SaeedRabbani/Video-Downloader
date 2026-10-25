@@ -26,7 +26,7 @@ export function createMainWindow(preloadPath: string, rendererUrlOrFile: string)
       preload: preloadPath,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true,
+      sandbox: false,
       webSecurity: true,
       allowRunningInsecureContent: false,
       spellcheck: false,

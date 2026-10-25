@@ -23,6 +23,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 
 // src/main/index.ts
 var import_electron3 = require("electron");
+var import_node_fs13 = __toESM(require("node:fs"), 1);
 var import_node_path12 = __toESM(require("node:path"), 1);
 
 // src/main/ipc/handlers.ts
@@ -156,6 +157,7 @@ var IPC_CHANNELS = {
   OPEN_FOLDER: "uvd:open-folder",
   SELECT_DIRECTORY: "uvd:select-directory",
   SELECT_COOKIES_FILE: "uvd:select-cookies-file",
+  GET_AVAILABLE_DIRECTORIES: "uvd:get-available-directories",
   GET_SETTINGS: "uvd:get-settings",
   UPDATE_SETTINGS: "uvd:update-settings",
   GET_BINARY_STATUS: "uvd:get-binary-status",
@@ -184,6 +186,7 @@ var ALLOWED_INVOKE_CHANNELS = /* @__PURE__ */ new Set([
   IPC_CHANNELS.OPEN_FOLDER,
   IPC_CHANNELS.SELECT_DIRECTORY,
   IPC_CHANNELS.SELECT_COOKIES_FILE,
+  IPC_CHANNELS.GET_AVAILABLE_DIRECTORIES,
   IPC_CHANNELS.GET_SETTINGS,
   IPC_CHANNELS.UPDATE_SETTINGS,
   IPC_CHANNELS.GET_BINARY_STATUS,
@@ -504,6 +507,11 @@ function registerElectronIpcHandlers(container, getMainWindow) {
     const chosenFile = import_node_path.default.resolve(result.filePaths[0]);
     container.repositories.updateSettings({ cookiesFilePath: chosenFile });
     return chosenFile;
+  });
+  handleSecure(IPC_CHANNELS.GET_AVAILABLE_DIRECTORIES, async () => {
+    const current = container.repositories.getSettings().defaultDownloadDir;
+    const dirs = /* @__PURE__ */ new Set([current, container.downloadsDir]);
+    return Array.from(dirs).filter(Boolean);
   });
   handleSecure(IPC_CHANNELS.GET_SETTINGS, async () => {
     return container.repositories.getSettings();
@@ -1815,8 +1823,10 @@ var BinaryManager = class {
       dirs.push(import_node_path5.default.join(procWithResources.resourcesPath, "binaries"));
       dirs.push(procWithResources.resourcesPath);
     }
-    dirs.push(import_node_path5.default.resolve(process.cwd(), "resources", "binaries"));
+    const workspaceBinDir = import_node_path5.default.resolve(process.cwd(), "resources", "binaries");
+    dirs.push(workspaceBinDir);
     this.resourceDirs = dirs;
+    this.writableBootstrapDir = customResourceDir || workspaceBinDir;
   }
   resolveBinaryCandidatePaths(name) {
     const isWin = process.platform === "win32";
@@ -1894,7 +1904,7 @@ var BinaryManager = class {
   }
   async tryBootstrapYtDlpBinary() {
     try {
-      const targetDir = this.resourceDirs[this.resourceDirs.length - 1];
+      const targetDir = this.writableBootstrapDir;
       import_node_fs6.default.mkdirSync(targetDir, { recursive: true });
       const isWin = process.platform === "win32";
       const fileName = isWin ? "yt-dlp.exe" : "yt-dlp";
@@ -3740,7 +3750,7 @@ var AppBackendContainer = class {
       currentSettings.defaultDownloadDir || this.downloadsDir,
       this.tempDir
     );
-    this.binaryManager = new BinaryManager();
+    this.binaryManager = new BinaryManager(import_node_path10.default.join(this.dataDir, "binaries"));
     this.mediaProcessor = new MediaProcessor(this.binaryManager);
     this.urlValidationOptions = {
       allowAuthorizedLocalTestServerPort: this.localMediaPort,
@@ -3879,7 +3889,7 @@ function createMainWindow(preloadPath, rendererUrlOrFile) {
       preload: preloadPath,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true,
+      sandbox: false,
       webSecurity: true,
       allowRunningInsecureContent: false,
       spellcheck: false
@@ -3909,6 +3919,20 @@ function createMainWindow(preloadPath, rendererUrlOrFile) {
 // src/main/index.ts
 var mainWindow = null;
 var backendContainer = null;
+function resolvePreloadScriptPath() {
+  const cjsCandidate = import_node_path12.default.join(__dirname, "../preload/index.cjs");
+  if (import_node_fs13.default.existsSync(cjsCandidate)) {
+    return cjsCandidate;
+  }
+  return import_node_path12.default.join(__dirname, "../preload/index.js");
+}
+function resolveRendererHtmlPath() {
+  const relativeDist = import_node_path12.default.join(__dirname, "../../dist/index.html");
+  if (import_node_fs13.default.existsSync(relativeDist)) {
+    return relativeDist;
+  }
+  return import_node_path12.default.join(import_electron3.app.getAppPath(), "dist/index.html");
+}
 async function bootstrapElectronApp() {
   await import_electron3.app.whenReady();
   import_electron3.Menu.setApplicationMenu(null);
@@ -3921,11 +3945,15 @@ async function bootstrapElectronApp() {
     tempDir,
     startEmbeddedMediaServer: true
   });
-  await backendContainer.initialize();
   registerElectronIpcHandlers(backendContainer, () => mainWindow);
-  const preloadPath = import_node_path12.default.join(__dirname, "../preload/index.js");
+  try {
+    await backendContainer.initialize();
+  } catch (err) {
+    console.error("Non-fatal backend container initialization warning:", err);
+  }
+  const preloadPath = resolvePreloadScriptPath();
   const devServerUrl = process.env.VITE_DEV_SERVER_URL;
-  const rendererTarget = devServerUrl || import_node_path12.default.join(__dirname, "../../dist/index.html");
+  const rendererTarget = devServerUrl || resolveRendererHtmlPath();
   mainWindow = createMainWindow(preloadPath, rendererTarget);
   import_electron3.app.on("activate", () => {
     if (import_electron3.BrowserWindow.getAllWindows().length === 0) {

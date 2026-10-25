@@ -59,7 +59,7 @@ export class AppBackendContainer {
       this.tempDir
     );
 
-    this.binaryManager = new BinaryManager();
+    this.binaryManager = new BinaryManager(path.join(this.dataDir, 'binaries'));
     this.mediaProcessor = new MediaProcessor(this.binaryManager);
 
     this.urlValidationOptions = {
