@@ -1,4 +1,5 @@
 import { ChildProcess, spawn } from 'node:child_process';
+import dns from 'node:dns/promises';
 import fs from 'node:fs';
 import path from 'node:path';
 import { AppError, classifyStderrError, ErrorCode } from '../../shared/errors/taxonomy';
@@ -15,6 +16,8 @@ import {
   MediaStreamType,
 } from '../../shared/types';
 import { getCollisionSafeFilePath, resolveSafeChildPath } from '../filesystem/pathSanitizer';
+import { sharedLocalDohProxy } from '../security/dohResolver';
+import { isPrivateOrReservedIp } from '../security/urlValidator';
 import { BinaryManager } from './binaryManager';
 import { MediaProcessor } from './mediaProcessor';
 
@@ -199,13 +202,22 @@ export function normalizeYtDlpFormats(rawFormats: RawYtDlpFormat[]): MediaFormat
   return normalized.sort((a, b) => {
     const hDiff = (b.height || 0) - (a.height || 0);
     if (hDiff !== 0) return hDiff;
+    const aMissingPot = a.formatNote.toUpperCase().includes('MISSING POT') ? 1 : 0;
+    const bMissingPot = b.formatNote.toUpperCase().includes('MISSING POT') ? 1 : 0;
+    if (aMissingPot !== bMissingPot) return aMissingPot - bMissingPot;
+    const fpsDiff = (b.fps || 0) - (a.fps || 0);
+    if (fpsDiff !== 0) return fpsDiff;
     return (b.tbrKbps || 0) - (a.tbrKbps || 0);
   });
 }
 
+const YOUTUBE_EXTRACTOR_ARGS =
+  'youtube:player_client=default,tv,web_safari,mweb,android_vr;formats=missing_pot';
+
 export class YtDlpExtractor implements ExtractorContract {
   private readonly activeProcesses = new Map<string, ChildProcess>();
   private readonly sessionAuthArgs = new Map<string, string[]>();
+  private readonly sessionProxyUrl = new Map<string, string>();
 
   constructor(
     private readonly binaryManager: BinaryManager,
@@ -255,22 +267,63 @@ export class YtDlpExtractor implements ExtractorContract {
     return ['--no-cookies'];
   }
 
-  private getNetworkAndSiteArgs(url: string, settings?: AppSettings): string[] {
+  private async isHostDnsPoisonedOrFiltered(url: string): Promise<boolean> {
+    try {
+      const host = new URL(url).hostname.toLowerCase();
+      if (
+        host === '127.0.0.1' ||
+        host === 'localhost' ||
+        host.endsWith('.local') ||
+        host.endsWith('.internal')
+      ) {
+        return false;
+      }
+      if (
+        host.includes('bilibili.tv') ||
+        host.includes('bilibili.com') ||
+        host.includes('b23.tv')
+      ) {
+        return true;
+      }
+      const records = await dns.lookup(host, { all: true });
+      return records.some((r) => isPrivateOrReservedIp(r.address));
+    } catch {
+      return true;
+    }
+  }
+
+  private getNetworkAndSiteArgs(
+    url: string,
+    settings?: AppSettings,
+    overrideProxyUrl?: string | null
+  ): string[] {
     const args: string[] = [];
 
-    if (settings?.proxyUrl && settings.proxyUrl.trim()) {
-      args.push('--proxy', settings.proxyUrl.trim());
+    const effectiveProxy =
+      settings?.proxyUrl && settings.proxyUrl.trim()
+        ? settings.proxyUrl.trim()
+        : overrideProxyUrl || '';
+
+    if (effectiveProxy) {
+      args.push('--proxy', effectiveProxy);
     }
 
     if (settings?.geoBypassCountry && settings.geoBypassCountry !== 'none') {
       const countryCode =
-        settings.geoBypassCountry === 'auto' ? 'US' : settings.geoBypassCountry.toUpperCase();
+        settings.geoBypassCountry === 'auto' ? 'SG' : settings.geoBypassCountry.toUpperCase();
       args.push('--xff', countryCode);
     }
 
     try {
       const host = new URL(url).hostname.toLowerCase();
-      if (host.includes('bilibili.com') || host.includes('b23.tv')) {
+      if (host.includes('bilibili.tv')) {
+        args.push(
+          '--add-header',
+          'Referer:https://www.bilibili.tv/',
+          '--user-agent',
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+        );
+      } else if (host.includes('bilibili.com') || host.includes('b23.tv')) {
         args.push(
           '--add-header',
           'Referer:https://www.bilibili.com/',
@@ -289,10 +342,12 @@ export class YtDlpExtractor implements ExtractorContract {
     ytDlpBin: string,
     url: string,
     extraAuthArgs: string[],
-    timeoutMs: number
+    timeoutMs: number,
+    overrideProxyUrl?: string | null
   ): Promise<{ stdout: string; stderr: string }> {
     const settings = this.getSettings?.();
-    const networkArgs = this.getNetworkAndSiteArgs(url, settings);
+    const networkArgs = this.getNetworkAndSiteArgs(url, settings, overrideProxyUrl);
+    const jsRuntimeSpec = this.binaryManager.ensureJsRuntimeSpec();
 
     const args = [
       '--dump-single-json',
@@ -301,9 +356,9 @@ export class YtDlpExtractor implements ExtractorContract {
       '--no-check-certificates',
       '--geo-bypass',
       '--js-runtimes',
-      'node',
+      jsRuntimeSpec,
       '--extractor-args',
-      'youtube:player_client=default,mweb,tv_simply,android_vr',
+      YOUTUBE_EXTRACTOR_ARGS,
       '--socket-timeout',
       '15',
       ...networkArgs,
@@ -360,6 +415,40 @@ export class YtDlpExtractor implements ExtractorContract {
     });
   }
 
+  private parseAnalysisJson(stdout: string, stderr: string): {
+    parsed: Record<string, unknown>;
+    formats: MediaFormat[];
+  } {
+    let parsed: Record<string, unknown>;
+    try {
+      const jsonStart = stdout.indexOf('{');
+      const jsonEnd = stdout.lastIndexOf('}');
+      const jsonSlice =
+        jsonStart !== -1 && jsonEnd > jsonStart ? stdout.slice(jsonStart, jsonEnd + 1) : stdout;
+      parsed = JSON.parse(jsonSlice) as Record<string, unknown>;
+    } catch {
+      throw classifyStderrError(stderr || 'Extractor returned non-JSON output.');
+    }
+
+    const rawFormats = Array.isArray(parsed.formats)
+      ? (parsed.formats as RawYtDlpFormat[])
+      : [
+          {
+            format_id: String(parsed.format_id || 'default'),
+            ext: String(parsed.ext || 'mp4'),
+            vcodec: String(parsed.vcodec || 'h264'),
+            acodec: String(parsed.acodec || 'aac'),
+            height: typeof parsed.height === 'number' ? parsed.height : null,
+            width: typeof parsed.width === 'number' ? parsed.width : null,
+            fps: typeof parsed.fps === 'number' ? parsed.fps : null,
+            filesize: typeof parsed.filesize === 'number' ? parsed.filesize : null,
+          },
+        ];
+
+    const formats = normalizeYtDlpFormats(rawFormats);
+    return { parsed, formats };
+  }
+
   public async analyze(url: string, options?: AnalyzeOptions): Promise<MediaAnalysisResult> {
     const binStatus = await this.binaryManager.verifyAllBinaries();
     if (!binStatus.ytDlp.available || !binStatus.ytDlp.resolvedPath) {
@@ -372,7 +461,16 @@ export class YtDlpExtractor implements ExtractorContract {
     const settings = this.getSettings?.();
     const timeoutMs = options?.timeoutMs ?? 30000;
     let winningAuthArgs = this.getInitialCookieArgs(settings);
+    let winningProxyUrl: string | null = null;
     let authDiagnosticNote: string | null = null;
+
+    const hasUserProxy = Boolean(settings?.proxyUrl && settings.proxyUrl.trim());
+    if (!hasUserProxy && (await this.isHostDnsPoisonedOrFiltered(url))) {
+      winningProxyUrl = await sharedLocalDohProxy.ensureStarted();
+      if (winningProxyUrl) {
+        authDiagnosticNote = 'Resolved via built-in DNS-over-HTTPS anti-sinkhole tunnel.';
+      }
+    }
 
     let result: { stdout: string; stderr: string } | null = null;
 
@@ -381,7 +479,8 @@ export class YtDlpExtractor implements ExtractorContract {
         binStatus.ytDlp.resolvedPath,
         url,
         winningAuthArgs,
-        timeoutMs
+        timeoutMs,
+        winningProxyUrl
       );
     } catch (firstErr) {
       const rawStderr =
@@ -413,7 +512,8 @@ export class YtDlpExtractor implements ExtractorContract {
               binStatus.ytDlp.resolvedPath,
               url,
               browserArgs,
-              20000
+              20000,
+              winningProxyUrl
             );
             winningAuthArgs = browserArgs;
             authDiagnosticNote = `Verified via local ${browser} session profile.`;
@@ -453,52 +553,98 @@ export class YtDlpExtractor implements ExtractorContract {
         const isNetworkTimeoutOrRefused =
           lower.includes('timed out') ||
           lower.includes('connection reset') ||
+          lower.includes('connection refused') ||
+          lower.includes('10061') ||
           lower.includes('unreachable') ||
           lower.includes('getaddrinfo') ||
           lower.includes('ssl') ||
           lower.includes('451') ||
-          lower.includes('geo');
-        if (isNetworkTimeoutOrRefused && (!settings?.proxyUrl || !settings.proxyUrl.trim())) {
-          throw new AppError(
-            ErrorCode.NETWORK_FAILURE,
-            'Could not reach the source website (it may be regionally blocked in your country/ISP, such as Bilibili in Pakistan). Open "Unblock / Proxy" on the Home bar or in Settings to configure an HTTP/SOCKS5 proxy and Geo-Bypass country.',
-            rawStderr,
-            true
-          );
+          lower.includes('geo') ||
+          lower.includes('502');
+
+        // If we haven't tried the built-in DoH proxy yet, retry once through DoH
+        if (isNetworkTimeoutOrRefused && !hasUserProxy && !winningProxyUrl) {
+          try {
+            const dohProxy = await sharedLocalDohProxy.ensureStarted();
+            if (dohProxy) {
+              result = await this.runYtDlpAnalyzeAttempt(
+                binStatus.ytDlp.resolvedPath,
+                url,
+                winningAuthArgs,
+                20000,
+                dohProxy
+              );
+              winningProxyUrl = dohProxy;
+              authDiagnosticNote = 'Resolved via built-in DNS-over-HTTPS anti-sinkhole tunnel.';
+            }
+          } catch {
+            // Fall through to descriptive error below
+          }
         }
-        throw firstErr;
+
+        if (!result) {
+          if (isNetworkTimeoutOrRefused && !hasUserProxy) {
+            throw new AppError(
+              ErrorCode.NETWORK_FAILURE,
+              'Could not reach the source website even after bypassing ISP DNS via DNS-over-HTTPS (your ISP may also be blocking the server IP directly, such as Bilibili in Pakistan). Click "Unblock / Proxy" under the URL bar to enter an HTTP or SOCKS5 proxy (e.g. http://127.0.0.1:7890 or socks5://127.0.0.1:1080).',
+              rawStderr,
+              true
+            );
+          }
+          throw firstErr;
+        }
       }
     }
 
-    const { stdout, stderr } = result;
+    let { parsed, formats } = this.parseAnalysisJson(result.stdout, result.stderr);
 
-    let parsed: Record<string, unknown>;
-    try {
-      const jsonStart = stdout.indexOf('{');
-      const jsonEnd = stdout.lastIndexOf('}');
-      const jsonSlice =
-        jsonStart !== -1 && jsonEnd > jsonStart ? stdout.slice(jsonStart, jsonEnd + 1) : stdout;
-      parsed = JSON.parse(jsonSlice) as Record<string, unknown>;
-    } catch {
-      throw classifyStderrError(stderr || 'Extractor returned non-JSON output.');
+    // If a YouTube URL analyzed without cookies returned only <= 360p (itag 18) because YouTube
+    // required login/verification on the HD player clients, automatically check local browser profiles
+    // to unlock 720p / 1080p / 1440p / 4K streams.
+    const parsedUrl = new URL(url);
+    const isYouTubeHost =
+      parsedUrl.hostname.includes('youtube.com') || parsedUrl.hostname.includes('youtu.be');
+    const maxVideoHeight = formats.reduce((max, f) => Math.max(max, f.height || 0), 0);
+
+    if (
+      isYouTubeHost &&
+      maxVideoHeight <= 360 &&
+      winningAuthArgs.includes('--no-cookies') &&
+      (!settings || settings.cookiesFromBrowser !== 'none')
+    ) {
+      const candidateBrowsers =
+        settings?.cookiesFromBrowser && settings.cookiesFromBrowser !== 'auto'
+          ? [settings.cookiesFromBrowser]
+          : ['firefox', 'edge', 'chrome', 'brave'];
+
+      for (const browser of candidateBrowsers) {
+        try {
+          const browserArgs = ['--cookies-from-browser', browser];
+          const upgradeRes = await this.runYtDlpAnalyzeAttempt(
+            binStatus.ytDlp.resolvedPath,
+            url,
+            browserArgs,
+            18000,
+            winningProxyUrl
+          );
+          const candidateParsed = this.parseAnalysisJson(upgradeRes.stdout, upgradeRes.stderr);
+          const candidateMaxHeight = candidateParsed.formats.reduce(
+            (max, f) => Math.max(max, f.height || 0),
+            0
+          );
+          if (candidateMaxHeight > maxVideoHeight) {
+            parsed = candidateParsed.parsed;
+            formats = candidateParsed.formats;
+            winningAuthArgs = browserArgs;
+            authDiagnosticNote = `Unlocked HD (${candidateMaxHeight}p) via local ${browser} session.`;
+            break;
+          }
+        } catch {
+          // Keep existing formats if browser profile is unavailable or locked
+        }
+      }
     }
 
-    const rawFormats = Array.isArray(parsed.formats)
-      ? (parsed.formats as RawYtDlpFormat[])
-      : [
-          {
-            format_id: String(parsed.format_id || 'default'),
-            ext: String(parsed.ext || 'mp4'),
-            vcodec: String(parsed.vcodec || 'h264'),
-            acodec: String(parsed.acodec || 'aac'),
-            height: typeof parsed.height === 'number' ? parsed.height : null,
-            width: typeof parsed.width === 'number' ? parsed.width : null,
-            fps: typeof parsed.fps === 'number' ? parsed.fps : null,
-            filesize: typeof parsed.filesize === 'number' ? parsed.filesize : null,
-          },
-        ];
-
-    const formats = normalizeYtDlpFormats(rawFormats);
     if (formats.length === 0) {
       throw new AppError(
         ErrorCode.UNAVAILABLE_MEDIA,
@@ -506,7 +652,6 @@ export class YtDlpExtractor implements ExtractorContract {
       );
     }
 
-    const parsedUrl = new URL(url);
     const availableResolutions = Array.from(
       new Set(formats.filter((f) => f.height !== null).map((f) => `${f.height}p`))
     );
@@ -516,6 +661,9 @@ export class YtDlpExtractor implements ExtractorContract {
 
     const analysisId = `anl_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     this.sessionAuthArgs.set(analysisId, winningAuthArgs);
+    if (winningProxyUrl) {
+      this.sessionProxyUrl.set(analysisId, winningProxyUrl);
+    }
 
     const diagnosticMessages = [
       `Extractor "${
@@ -567,10 +715,19 @@ export class YtDlpExtractor implements ExtractorContract {
       throw new AppError(ErrorCode.PACKAGING_DEPENDENCY_ERROR, 'yt-dlp binary is unavailable.');
     }
 
-    const formatExpr =
+    let formatExpr =
       selectedFormat.requiresMerge && selectedAudioFormat
         ? `${selectedFormat.formatId}+${selectedAudioFormat.formatId}`
         : selectedFormat.formatId;
+
+    if (selectedFormat.height && selectedFormat.hasVideo) {
+      const h = selectedFormat.height;
+      if (selectedFormat.requiresMerge) {
+        formatExpr = `${formatExpr}/${selectedFormat.formatId}+bestaudio/bestvideo[height=${h}]+bestaudio/best[height=${h}]`;
+      } else {
+        formatExpr = `${formatExpr}/best[height=${h}]/bestvideo[height=${h}]+bestaudio`;
+      }
+    }
 
     const tempTemplate = resolveSafeChildPath(options.tempDir, 'stream_%(id)s.%(ext)s');
     const maxFileSizeArg = `${Math.max(
@@ -582,7 +739,9 @@ export class YtDlpExtractor implements ExtractorContract {
     const authArgs =
       this.sessionAuthArgs.get(analysis.analysisId) ||
       this.getInitialCookieArgs(settings);
-    const networkArgs = this.getNetworkAndSiteArgs(analysis.sourceUrl, settings);
+    const sessionProxy = this.sessionProxyUrl.get(analysis.analysisId) || null;
+    const networkArgs = this.getNetworkAndSiteArgs(analysis.sourceUrl, settings, sessionProxy);
+    const jsRuntimeSpec = this.binaryManager.ensureJsRuntimeSpec();
 
     const args: string[] = [
       '--no-playlist',
@@ -590,9 +749,9 @@ export class YtDlpExtractor implements ExtractorContract {
       '--no-check-certificates',
       '--geo-bypass',
       '--js-runtimes',
-      'node',
+      jsRuntimeSpec,
       '--extractor-args',
-      'youtube:player_client=default,mweb,tv_simply,android_vr',
+      YOUTUBE_EXTRACTOR_ARGS,
       ...networkArgs,
       ...authArgs,
       '--max-filesize',

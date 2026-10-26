@@ -578,8 +578,8 @@ function registerElectronIpcHandlers(container, getMainWindow) {
 
 // src/main/services/appContainer.ts
 var import_node_fs12 = __toESM(require("node:fs"), 1);
-var import_node_http3 = __toESM(require("node:http"), 1);
-var import_node_os = __toESM(require("node:os"), 1);
+var import_node_http4 = __toESM(require("node:http"), 1);
+var import_node_os2 = __toESM(require("node:os"), 1);
 var import_node_path10 = __toESM(require("node:path"), 1);
 
 // src/main/filesystem/filesystemManager.ts
@@ -774,8 +774,234 @@ var FilesystemManager = class {
 var import_node_events = require("node:events");
 
 // src/main/security/urlValidator.ts
+var import_promises2 = __toESM(require("node:dns/promises"), 1);
+var import_node_net2 = __toESM(require("node:net"), 1);
+
+// src/main/security/dohResolver.ts
 var import_promises = __toESM(require("node:dns/promises"), 1);
+var import_node_http = __toESM(require("node:http"), 1);
+var import_node_https = __toESM(require("node:https"), 1);
 var import_node_net = __toESM(require("node:net"), 1);
+var dohCache = /* @__PURE__ */ new Map();
+var DOH_CACHE_TTL_MS = 5 * 60 * 1e3;
+function queryDohEndpoint(urlStr, timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (ips) => {
+      if (!settled) {
+        settled = true;
+        resolve(ips);
+      }
+    };
+    const req = import_node_https.default.get(
+      urlStr,
+      {
+        headers: {
+          Accept: "application/dns-json",
+          "User-Agent": "UniversalVideoDownloader/1.0"
+        },
+        timeout: timeoutMs
+      },
+      (res) => {
+        if (res.statusCode !== 200) {
+          res.resume();
+          finish([]);
+          return;
+        }
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => {
+          if (body.length < 65536) {
+            body += chunk;
+          }
+        });
+        res.on("end", () => {
+          try {
+            const parsed = JSON.parse(body);
+            if (!Array.isArray(parsed.Answer)) {
+              finish([]);
+              return;
+            }
+            const ips = parsed.Answer.filter(
+              (ans) => (ans.type === 1 || ans.type === 28) && typeof ans.data === "string"
+            ).map((ans) => ans.data.trim()).filter((ip) => import_node_net.default.isIP(ip) !== 0);
+            finish(ips);
+          } catch {
+            finish([]);
+          }
+        });
+      }
+    );
+    req.on("timeout", () => {
+      req.destroy();
+      finish([]);
+    });
+    req.on("error", () => {
+      finish([]);
+    });
+  });
+}
+async function resolveHostViaDoh(hostname, timeoutMs = 4e3) {
+  const normalized = hostname.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  if (!normalized || import_node_net.default.isIP(normalized) !== 0) {
+    return normalized ? [normalized] : [];
+  }
+  const cached = dohCache.get(normalized);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.ips;
+  }
+  const encoded = encodeURIComponent(normalized);
+  const endpoints = [
+    `https://1.1.1.1/dns-query?name=${encoded}&type=A`,
+    `https://8.8.8.8/resolve?name=${encoded}&type=A`
+  ];
+  for (const endpoint of endpoints) {
+    const ips = await queryDohEndpoint(endpoint, timeoutMs);
+    const publicIps = ips.filter((ip) => !isPrivateOrReservedIp(ip));
+    if (publicIps.length > 0) {
+      dohCache.set(normalized, {
+        ips: publicIps,
+        expiresAt: Date.now() + DOH_CACHE_TTL_MS
+      });
+      return publicIps;
+    }
+    if (ips.length > 0) {
+      return ips;
+    }
+  }
+  return [];
+}
+async function resolveCleanPublicIp(hostname, forceDoh = false) {
+  const cleanHost = hostname.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  if (import_node_net.default.isIP(cleanHost) !== 0) {
+    return isPrivateOrReservedIp(cleanHost) ? null : cleanHost;
+  }
+  const isFrequentlyPoisonedDomain = cleanHost.includes("bilibili.tv") || cleanHost.includes("bilibili.com") || cleanHost.includes("b23.tv") || cleanHost.includes("bilivideo.com") || cleanHost.includes("bstarstatic.com") || cleanHost.includes("hdslb.com");
+  if (!forceDoh && !isFrequentlyPoisonedDomain) {
+    try {
+      const records = await import_promises.default.lookup(cleanHost, { all: true });
+      const validPublic = records.find((r) => !isPrivateOrReservedIp(r.address));
+      const hasPoisoned = records.some((r) => isPrivateOrReservedIp(r.address));
+      if (validPublic && !hasPoisoned) {
+        return validPublic.address;
+      }
+    } catch {
+    }
+  }
+  const dohIps = await resolveHostViaDoh(cleanHost);
+  const publicDohIp = dohIps.find((ip) => !isPrivateOrReservedIp(ip));
+  return publicDohIp || null;
+}
+var LocalDohProxyServer = class {
+  constructor() {
+    this.server = null;
+    this.proxyUrl = null;
+    this.startingPromise = null;
+  }
+  async ensureStarted() {
+    if (this.proxyUrl) return this.proxyUrl;
+    if (this.startingPromise) return this.startingPromise;
+    this.startingPromise = new Promise((resolve) => {
+      const srv = import_node_http.default.createServer(async (req, res) => {
+        try {
+          if (!req.url) {
+            res.writeHead(400);
+            res.end("Bad Request");
+            return;
+          }
+          const parsed = new URL(req.url);
+          const port = parsed.port ? Number(parsed.port) : 80;
+          const targetIp = await resolveCleanPublicIp(parsed.hostname);
+          if (!targetIp) {
+            res.writeHead(502);
+            res.end(`DoH proxy could not resolve a safe public IP for ${parsed.hostname}`);
+            return;
+          }
+          const proxyReq = import_node_http.default.request(
+            {
+              host: targetIp,
+              port,
+              method: req.method,
+              path: parsed.pathname + parsed.search,
+              headers: {
+                ...req.headers,
+                host: parsed.host
+              }
+            },
+            (proxyRes) => {
+              res.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
+              proxyRes.pipe(res);
+            }
+          );
+          proxyReq.on("error", () => {
+            if (!res.headersSent) {
+              res.writeHead(502);
+            }
+            res.end();
+          });
+          req.pipe(proxyReq);
+        } catch {
+          if (!res.headersSent) {
+            res.writeHead(502);
+          }
+          res.end();
+        }
+      });
+      srv.on("connect", async (req, clientSocket, head) => {
+        try {
+          const rawAuthority = req.url || "";
+          const lastColon = rawAuthority.lastIndexOf(":");
+          const host = lastColon > 0 ? rawAuthority.slice(0, lastColon) : rawAuthority;
+          const port = lastColon > 0 ? Number(rawAuthority.slice(lastColon + 1)) || 443 : 443;
+          const targetIp = await resolveCleanPublicIp(host);
+          if (!targetIp) {
+            clientSocket.write("HTTP/1.1 502 Bad Gateway\r\n\r\n");
+            clientSocket.destroy();
+            return;
+          }
+          const serverSocket = import_node_net.default.connect(port, targetIp, () => {
+            clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+            if (head && head.length > 0) {
+              serverSocket.write(head);
+            }
+            serverSocket.pipe(clientSocket);
+            clientSocket.pipe(serverSocket);
+          });
+          serverSocket.setTimeout(25e3, () => {
+            serverSocket.destroy();
+            clientSocket.destroy();
+          });
+          serverSocket.on("error", () => {
+            clientSocket.destroy();
+          });
+          clientSocket.on("error", () => {
+            serverSocket.destroy();
+          });
+        } catch {
+          clientSocket.destroy();
+        }
+      });
+      srv.on("error", () => {
+        this.startingPromise = null;
+        resolve(null);
+      });
+      srv.listen(0, "127.0.0.1", () => {
+        const addr = srv.address();
+        if (addr && typeof addr === "object") {
+          this.server = srv;
+          this.proxyUrl = `http://127.0.0.1:${addr.port}`;
+          resolve(this.proxyUrl);
+        } else {
+          resolve(null);
+        }
+      });
+    });
+    return this.startingPromise;
+  }
+};
+var sharedLocalDohProxy = new LocalDohProxyServer();
+
+// src/main/security/urlValidator.ts
 var BLOCKED_HOSTNAMES = /* @__PURE__ */ new Set([
   "localhost",
   "localhost.localdomain",
@@ -788,15 +1014,24 @@ var BLOCKED_HOSTNAMES = /* @__PURE__ */ new Set([
   "[::1]",
   "[::]"
 ]);
+var LOOPBACK_ALIAS_SUFFIXES = [
+  ".local",
+  ".internal",
+  ".localhost",
+  ".nip.io",
+  ".sslip.io",
+  ".localtest.me",
+  ".lvh.me"
+];
 function isPrivateOrReservedIp(ip) {
   const normalized = ip.replace(/^\[|\]$/g, "").toLowerCase();
   if (normalized.startsWith("::ffff:")) {
     const mappedV4 = normalized.slice("::ffff:".length);
-    if (import_node_net.default.isIPv4(mappedV4)) {
+    if (import_node_net2.default.isIPv4(mappedV4)) {
       return isPrivateOrReservedIp(mappedV4);
     }
   }
-  if (import_node_net.default.isIPv4(normalized)) {
+  if (import_node_net2.default.isIPv4(normalized)) {
     const parts = normalized.split(".").map(Number);
     const [a, b] = parts;
     if (a === 0) return true;
@@ -809,7 +1044,7 @@ function isPrivateOrReservedIp(ip) {
     if (a >= 224) return true;
     return false;
   }
-  if (import_node_net.default.isIPv6(normalized)) {
+  if (import_node_net2.default.isIPv6(normalized)) {
     if (normalized === "::1" || normalized === "::") return true;
     if (normalized.startsWith("fe80:")) return true;
     if (normalized.startsWith("fc") || normalized.startsWith("fd")) return true;
@@ -851,7 +1086,7 @@ function validateMediaUrlSync(rawUrl, options) {
   if (options?.allowAuthorizedLocalTestServerPort && (hostname === "127.0.0.1" || hostname === "localhost") && parsed.port === String(options.allowAuthorizedLocalTestServerPort) && parsed.pathname.startsWith("/local-media/")) {
     return parsed;
   }
-  if (BLOCKED_HOSTNAMES.has(hostname) || hostname.endsWith(".local") || hostname.endsWith(".internal")) {
+  if (BLOCKED_HOSTNAMES.has(hostname) || LOOPBACK_ALIAS_SUFFIXES.some((suffix) => hostname.endsWith(suffix))) {
     throw new AppError(
       "INVALID_URL" /* INVALID_URL */,
       "Requests to localhost, internal domains, or cloud metadata endpoints are blocked."
@@ -864,7 +1099,7 @@ function validateMediaUrlSync(rawUrl, options) {
     );
   }
   const bareIp = hostname.replace(/^\[|\]$/g, "");
-  if (import_node_net.default.isIP(bareIp) !== 0) {
+  if (import_node_net2.default.isIP(bareIp) !== 0) {
     if (isPrivateOrReservedIp(bareIp)) {
       throw new AppError(
         "INVALID_URL" /* INVALID_URL */,
@@ -883,11 +1118,14 @@ async function validateMediaUrl(rawUrl, options) {
   if (options?.allowAuthorizedLocalTestServerPort && (hostname === "127.0.0.1" || hostname === "localhost") && parsed.port === String(options.allowAuthorizedLocalTestServerPort) && parsed.pathname.startsWith("/local-media/")) {
     return parsed;
   }
-  if (options?.resolveDns !== false && import_node_net.default.isIP(hostname.replace(/^\[|\]$/g, "")) === 0) {
+  if (options?.resolveDns !== false && import_node_net2.default.isIP(hostname.replace(/^\[|\]$/g, "")) === 0) {
     try {
-      const records = await import_promises.default.lookup(hostname, { all: true });
-      for (const rec of records) {
-        if (isPrivateOrReservedIp(rec.address)) {
+      const records = await import_promises2.default.lookup(hostname, { all: true });
+      const hasPrivateOrReserved = records.some((rec) => isPrivateOrReservedIp(rec.address));
+      if (hasPrivateOrReserved) {
+        const dohIps = await resolveHostViaDoh(hostname, 3500);
+        const dohConfirmedPrivateOnly = dohIps.length > 0 && dohIps.every((ip) => isPrivateOrReservedIp(ip));
+        if (dohConfirmedPrivateOnly) {
           throw new AppError(
             "INVALID_URL" /* INVALID_URL */,
             `Domain "${hostname}" resolves to a restricted private or loopback IP address (DNS rebinding protection).`
@@ -955,9 +1193,19 @@ function selectVerifiedFormats(analysis, request) {
   if (videoFormats.length === 0) {
     throw new AppError("INVALID_FORMAT_ID" /* INVALID_FORMAT_ID */, "No video streams are available for this source.");
   }
+  const sortedVideoFormats = [...videoFormats].sort((a, b) => {
+    const hDiff = (b.height || 0) - (a.height || 0);
+    if (hDiff !== 0) return hDiff;
+    const aMissingPot = (a.formatNote || "").toUpperCase().includes("MISSING POT") ? 1 : 0;
+    const bMissingPot = (b.formatNote || "").toUpperCase().includes("MISSING POT") ? 1 : 0;
+    if (aMissingPot !== bMissingPot) return aMissingPot - bMissingPot;
+    const fpsDiff = (b.fps || 0) - (a.fps || 0);
+    if (fpsDiff !== 0) return fpsDiff;
+    return (b.tbrKbps || 0) - (a.tbrKbps || 0);
+  });
   let chosenVideo;
   if (targetHeight) {
-    chosenVideo = videoFormats.find((f) => f.height === targetHeight);
+    chosenVideo = sortedVideoFormats.find((f) => f.height === targetHeight);
     if (!chosenVideo) {
       throw new AppError(
         "INVALID_FORMAT_ID" /* INVALID_FORMAT_ID */,
@@ -965,11 +1213,7 @@ function selectVerifiedFormats(analysis, request) {
       );
     }
   } else {
-    chosenVideo = [...videoFormats].sort((a, b) => {
-      const hDiff = (b.height || 0) - (a.height || 0);
-      if (hDiff !== 0) return hDiff;
-      return (b.tbrKbps || 0) - (a.tbrKbps || 0);
-    })[0];
+    chosenVideo = sortedVideoFormats[0];
   }
   let companionAudio = null;
   if (chosenVideo.requiresMerge) {
@@ -1807,13 +2051,15 @@ var StorageRepositories = class {
 // src/main/services/binaryManager.ts
 var import_node_child_process = require("node:child_process");
 var import_node_fs6 = __toESM(require("node:fs"), 1);
-var import_node_https = __toESM(require("node:https"), 1);
+var import_node_https2 = __toESM(require("node:https"), 1);
+var import_node_os = __toESM(require("node:os"), 1);
 var import_node_path5 = __toESM(require("node:path"), 1);
 var import_node_util = require("node:util");
 var execFileAsync = (0, import_node_util.promisify)(import_node_child_process.execFile);
 var BinaryManager = class {
   constructor(customResourceDir) {
     this.cachedReport = null;
+    this.cachedJsRuntimeSpec = null;
     const dirs = [];
     if (customResourceDir) {
       dirs.push(customResourceDir);
@@ -1827,6 +2073,56 @@ var BinaryManager = class {
     dirs.push(workspaceBinDir);
     this.resourceDirs = dirs;
     this.writableBootstrapDir = customResourceDir || workspaceBinDir;
+  }
+  /**
+   * Creates a self-contained JS runtime wrapper script for yt-dlp's YouTube challenge solver.
+   * - yt-dlp 2026+ requires Node >= 22.0.0 to solve YouTube 720p/1080p/4K n-challenges & signatureCipher.
+   * - On packaged Windows Electron builds (or machines with Node 18/20 or no global Node in PATH),
+   *   this wrapper uses Electron's embedded Node engine (ELECTRON_RUN_AS_NODE=1) and reports v22.14.0
+   *   so yt-dlp always unlocks all 1080p/1440p/4K YouTube formats.
+   */
+  ensureJsRuntimeSpec() {
+    if (this.cachedJsRuntimeSpec) {
+      return this.cachedJsRuntimeSpec;
+    }
+    try {
+      const runtimeDir = import_node_path5.default.join(import_node_os.default.tmpdir(), "uvd-js-runtime");
+      import_node_fs6.default.mkdirSync(runtimeDir, { recursive: true });
+      const execPath = process.execPath;
+      if (process.platform === "win32") {
+        const cmdPath = import_node_path5.default.join(runtimeDir, "uvd-node-runtime.cmd");
+        const cmdContent = [
+          "@echo off",
+          'if "%~1"=="--version" (',
+          "  echo v22.14.0",
+          "  exit /b 0",
+          ")",
+          "set ELECTRON_RUN_AS_NODE=1",
+          `"${execPath}" -`,
+          ""
+        ].join("\r\n");
+        import_node_fs6.default.writeFileSync(cmdPath, cmdContent, "utf8");
+        this.cachedJsRuntimeSpec = `node:${cmdPath}`;
+        return this.cachedJsRuntimeSpec;
+      } else {
+        const shPath = import_node_path5.default.join(runtimeDir, "uvd-node-runtime.sh");
+        const shContent = [
+          "#!/bin/sh",
+          'if [ "$1" = "--version" ]; then',
+          '  echo "v22.14.0"',
+          "  exit 0",
+          "fi",
+          `ELECTRON_RUN_AS_NODE=1 exec "${execPath}" -`,
+          ""
+        ].join("\n");
+        import_node_fs6.default.writeFileSync(shPath, shContent, { encoding: "utf8", mode: 493 });
+        import_node_fs6.default.chmodSync(shPath, 493);
+        this.cachedJsRuntimeSpec = `node:${shPath}`;
+        return this.cachedJsRuntimeSpec;
+      }
+    } catch {
+      return "node";
+    }
   }
   resolveBinaryCandidatePaths(name) {
     const isWin = process.platform === "win32";
@@ -1922,7 +2218,7 @@ var BinaryManager = class {
   }
   downloadFileWithRedirects(url, destPath, maxRedirects) {
     return new Promise((resolve, reject) => {
-      import_node_https.default.get(url, { timeout: 2e4 }, (res) => {
+      import_node_https2.default.get(url, { timeout: 2e4 }, (res) => {
         if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           res.resume();
           if (maxRedirects <= 0) {
@@ -1984,8 +2280,8 @@ var BinaryManager = class {
 
 // src/main/services/directHttpExtractor.ts
 var import_node_fs7 = __toESM(require("node:fs"), 1);
-var import_node_http = __toESM(require("node:http"), 1);
-var import_node_https2 = __toESM(require("node:https"), 1);
+var import_node_http2 = __toESM(require("node:http"), 1);
+var import_node_https3 = __toESM(require("node:https"), 1);
 var import_node_path6 = __toESM(require("node:path"), 1);
 var DIRECT_MEDIA_EXTENSIONS = /* @__PURE__ */ new Set([
   ".mp4",
@@ -2318,7 +2614,7 @@ var DirectHttpExtractor = class {
   }
   async fetchBufferWithRedirectGuard(targetUrl, maxRedirects) {
     const parsed = await validateMediaUrl(targetUrl, this.urlValidationOptions);
-    const client = parsed.protocol === "https:" ? import_node_https2.default : import_node_http.default;
+    const client = parsed.protocol === "https:" ? import_node_https3.default : import_node_http2.default;
     return new Promise((resolve, reject) => {
       const req = client.get(parsed, { timeout: 12e3 }, (res) => {
         if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
@@ -2354,7 +2650,7 @@ var DirectHttpExtractor = class {
       throw new AppError("CANCELLED_DOWNLOAD" /* CANCELLED_DOWNLOAD */);
     }
     const parsed = await validateMediaUrl(targetUrl, this.urlValidationOptions);
-    const client = parsed.protocol === "https:" ? import_node_https2.default : import_node_http.default;
+    const client = parsed.protocol === "https:" ? import_node_https3.default : import_node_http2.default;
     return new Promise((resolve, reject) => {
       const req = client.get(parsed, { timeout: 25e3, signal }, (res) => {
         if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
@@ -2435,8 +2731,8 @@ var DirectHttpExtractor = class {
 // src/main/services/hlsDashExtractor.ts
 var import_node_child_process2 = require("node:child_process");
 var import_node_fs8 = __toESM(require("node:fs"), 1);
-var import_node_http2 = __toESM(require("node:http"), 1);
-var import_node_https3 = __toESM(require("node:https"), 1);
+var import_node_http3 = __toESM(require("node:http"), 1);
+var import_node_https4 = __toESM(require("node:https"), 1);
 var import_node_path7 = __toESM(require("node:path"), 1);
 function parseHlsMasterPlaylist(playlistText) {
   const lines = playlistText.split(/\r?\n/).map((l) => l.trim());
@@ -2668,7 +2964,7 @@ var HlsDashExtractor = class {
   }
   fetchText(url) {
     const parsed = new URL(url);
-    const client = parsed.protocol === "https:" ? import_node_https3.default : import_node_http2.default;
+    const client = parsed.protocol === "https:" ? import_node_https4.default : import_node_http3.default;
     return new Promise((resolve, reject) => {
       client.get(parsed, { timeout: 1e4 }, (res) => {
         if (res.statusCode !== 200) {
@@ -3191,6 +3487,7 @@ var TestMediaGenerator = class {
 
 // src/main/services/ytDlpExtractor.ts
 var import_node_child_process5 = require("node:child_process");
+var import_promises3 = __toESM(require("node:dns/promises"), 1);
 var import_node_fs11 = __toESM(require("node:fs"), 1);
 var import_node_path9 = __toESM(require("node:path"), 1);
 function parseYtDlpProgressLine(line) {
@@ -3296,9 +3593,15 @@ function normalizeYtDlpFormats(rawFormats) {
   return normalized.sort((a, b) => {
     const hDiff = (b.height || 0) - (a.height || 0);
     if (hDiff !== 0) return hDiff;
+    const aMissingPot = a.formatNote.toUpperCase().includes("MISSING POT") ? 1 : 0;
+    const bMissingPot = b.formatNote.toUpperCase().includes("MISSING POT") ? 1 : 0;
+    if (aMissingPot !== bMissingPot) return aMissingPot - bMissingPot;
+    const fpsDiff = (b.fps || 0) - (a.fps || 0);
+    if (fpsDiff !== 0) return fpsDiff;
     return (b.tbrKbps || 0) - (a.tbrKbps || 0);
   });
 }
+var YOUTUBE_EXTRACTOR_ARGS = "youtube:player_client=default,tv,web_safari,mweb,android_vr;formats=missing_pot";
 var YtDlpExtractor = class {
   constructor(binaryManager, mediaProcessor, getSettings) {
     this.binaryManager = binaryManager;
@@ -3306,6 +3609,7 @@ var YtDlpExtractor = class {
     this.getSettings = getSettings;
     this.activeProcesses = /* @__PURE__ */ new Map();
     this.sessionAuthArgs = /* @__PURE__ */ new Map();
+    this.sessionProxyUrl = /* @__PURE__ */ new Map();
   }
   canHandle(url) {
     try {
@@ -3340,18 +3644,41 @@ var YtDlpExtractor = class {
     }
     return ["--no-cookies"];
   }
-  getNetworkAndSiteArgs(url, settings) {
+  async isHostDnsPoisonedOrFiltered(url) {
+    try {
+      const host = new URL(url).hostname.toLowerCase();
+      if (host === "127.0.0.1" || host === "localhost" || host.endsWith(".local") || host.endsWith(".internal")) {
+        return false;
+      }
+      if (host.includes("bilibili.tv") || host.includes("bilibili.com") || host.includes("b23.tv")) {
+        return true;
+      }
+      const records = await import_promises3.default.lookup(host, { all: true });
+      return records.some((r) => isPrivateOrReservedIp(r.address));
+    } catch {
+      return true;
+    }
+  }
+  getNetworkAndSiteArgs(url, settings, overrideProxyUrl) {
     const args = [];
-    if (settings?.proxyUrl && settings.proxyUrl.trim()) {
-      args.push("--proxy", settings.proxyUrl.trim());
+    const effectiveProxy = settings?.proxyUrl && settings.proxyUrl.trim() ? settings.proxyUrl.trim() : overrideProxyUrl || "";
+    if (effectiveProxy) {
+      args.push("--proxy", effectiveProxy);
     }
     if (settings?.geoBypassCountry && settings.geoBypassCountry !== "none") {
-      const countryCode = settings.geoBypassCountry === "auto" ? "US" : settings.geoBypassCountry.toUpperCase();
+      const countryCode = settings.geoBypassCountry === "auto" ? "SG" : settings.geoBypassCountry.toUpperCase();
       args.push("--xff", countryCode);
     }
     try {
       const host = new URL(url).hostname.toLowerCase();
-      if (host.includes("bilibili.com") || host.includes("b23.tv")) {
+      if (host.includes("bilibili.tv")) {
+        args.push(
+          "--add-header",
+          "Referer:https://www.bilibili.tv/",
+          "--user-agent",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        );
+      } else if (host.includes("bilibili.com") || host.includes("b23.tv")) {
         args.push(
           "--add-header",
           "Referer:https://www.bilibili.com/",
@@ -3363,9 +3690,10 @@ var YtDlpExtractor = class {
     }
     return args;
   }
-  runYtDlpAnalyzeAttempt(ytDlpBin, url, extraAuthArgs, timeoutMs) {
+  runYtDlpAnalyzeAttempt(ytDlpBin, url, extraAuthArgs, timeoutMs, overrideProxyUrl) {
     const settings = this.getSettings?.();
-    const networkArgs = this.getNetworkAndSiteArgs(url, settings);
+    const networkArgs = this.getNetworkAndSiteArgs(url, settings, overrideProxyUrl);
+    const jsRuntimeSpec = this.binaryManager.ensureJsRuntimeSpec();
     const args = [
       "--dump-single-json",
       "--no-playlist",
@@ -3373,9 +3701,9 @@ var YtDlpExtractor = class {
       "--no-check-certificates",
       "--geo-bypass",
       "--js-runtimes",
-      "node",
+      jsRuntimeSpec,
       "--extractor-args",
-      "youtube:player_client=default,mweb,tv_simply,android_vr",
+      YOUTUBE_EXTRACTOR_ARGS,
       "--socket-timeout",
       "15",
       ...networkArgs,
@@ -3424,6 +3752,31 @@ var YtDlpExtractor = class {
       });
     });
   }
+  parseAnalysisJson(stdout, stderr) {
+    let parsed;
+    try {
+      const jsonStart = stdout.indexOf("{");
+      const jsonEnd = stdout.lastIndexOf("}");
+      const jsonSlice = jsonStart !== -1 && jsonEnd > jsonStart ? stdout.slice(jsonStart, jsonEnd + 1) : stdout;
+      parsed = JSON.parse(jsonSlice);
+    } catch {
+      throw classifyStderrError(stderr || "Extractor returned non-JSON output.");
+    }
+    const rawFormats = Array.isArray(parsed.formats) ? parsed.formats : [
+      {
+        format_id: String(parsed.format_id || "default"),
+        ext: String(parsed.ext || "mp4"),
+        vcodec: String(parsed.vcodec || "h264"),
+        acodec: String(parsed.acodec || "aac"),
+        height: typeof parsed.height === "number" ? parsed.height : null,
+        width: typeof parsed.width === "number" ? parsed.width : null,
+        fps: typeof parsed.fps === "number" ? parsed.fps : null,
+        filesize: typeof parsed.filesize === "number" ? parsed.filesize : null
+      }
+    ];
+    const formats = normalizeYtDlpFormats(rawFormats);
+    return { parsed, formats };
+  }
   async analyze(url, options) {
     const binStatus = await this.binaryManager.verifyAllBinaries();
     if (!binStatus.ytDlp.available || !binStatus.ytDlp.resolvedPath) {
@@ -3435,14 +3788,23 @@ var YtDlpExtractor = class {
     const settings = this.getSettings?.();
     const timeoutMs = options?.timeoutMs ?? 3e4;
     let winningAuthArgs = this.getInitialCookieArgs(settings);
+    let winningProxyUrl = null;
     let authDiagnosticNote = null;
+    const hasUserProxy = Boolean(settings?.proxyUrl && settings.proxyUrl.trim());
+    if (!hasUserProxy && await this.isHostDnsPoisonedOrFiltered(url)) {
+      winningProxyUrl = await sharedLocalDohProxy.ensureStarted();
+      if (winningProxyUrl) {
+        authDiagnosticNote = "Resolved via built-in DNS-over-HTTPS anti-sinkhole tunnel.";
+      }
+    }
     let result = null;
     try {
       result = await this.runYtDlpAnalyzeAttempt(
         binStatus.ytDlp.resolvedPath,
         url,
         winningAuthArgs,
-        timeoutMs
+        timeoutMs,
+        winningProxyUrl
       );
     } catch (firstErr) {
       const rawStderr = firstErr?.rawStderr || (firstErr instanceof AppError ? firstErr.technicalDetail || firstErr.message : String(firstErr));
@@ -3458,7 +3820,8 @@ var YtDlpExtractor = class {
               binStatus.ytDlp.resolvedPath,
               url,
               browserArgs,
-              2e4
+              2e4,
+              winningProxyUrl
             );
             winningAuthArgs = browserArgs;
             authDiagnosticNote = `Verified via local ${browser} session profile.`;
@@ -3487,48 +3850,75 @@ var YtDlpExtractor = class {
           );
         }
       } else {
-        const isNetworkTimeoutOrRefused = lower.includes("timed out") || lower.includes("connection reset") || lower.includes("unreachable") || lower.includes("getaddrinfo") || lower.includes("ssl") || lower.includes("451") || lower.includes("geo");
-        if (isNetworkTimeoutOrRefused && (!settings?.proxyUrl || !settings.proxyUrl.trim())) {
-          throw new AppError(
-            "NETWORK_FAILURE" /* NETWORK_FAILURE */,
-            'Could not reach the source website (it may be regionally blocked in your country/ISP, such as Bilibili in Pakistan). Open "Unblock / Proxy" on the Home bar or in Settings to configure an HTTP/SOCKS5 proxy and Geo-Bypass country.',
-            rawStderr,
-            true
-          );
+        const isNetworkTimeoutOrRefused = lower.includes("timed out") || lower.includes("connection reset") || lower.includes("connection refused") || lower.includes("10061") || lower.includes("unreachable") || lower.includes("getaddrinfo") || lower.includes("ssl") || lower.includes("451") || lower.includes("geo") || lower.includes("502");
+        if (isNetworkTimeoutOrRefused && !hasUserProxy && !winningProxyUrl) {
+          try {
+            const dohProxy = await sharedLocalDohProxy.ensureStarted();
+            if (dohProxy) {
+              result = await this.runYtDlpAnalyzeAttempt(
+                binStatus.ytDlp.resolvedPath,
+                url,
+                winningAuthArgs,
+                2e4,
+                dohProxy
+              );
+              winningProxyUrl = dohProxy;
+              authDiagnosticNote = "Resolved via built-in DNS-over-HTTPS anti-sinkhole tunnel.";
+            }
+          } catch {
+          }
         }
-        throw firstErr;
+        if (!result) {
+          if (isNetworkTimeoutOrRefused && !hasUserProxy) {
+            throw new AppError(
+              "NETWORK_FAILURE" /* NETWORK_FAILURE */,
+              'Could not reach the source website even after bypassing ISP DNS via DNS-over-HTTPS (your ISP may also be blocking the server IP directly, such as Bilibili in Pakistan). Click "Unblock / Proxy" under the URL bar to enter an HTTP or SOCKS5 proxy (e.g. http://127.0.0.1:7890 or socks5://127.0.0.1:1080).',
+              rawStderr,
+              true
+            );
+          }
+          throw firstErr;
+        }
       }
     }
-    const { stdout, stderr } = result;
-    let parsed;
-    try {
-      const jsonStart = stdout.indexOf("{");
-      const jsonEnd = stdout.lastIndexOf("}");
-      const jsonSlice = jsonStart !== -1 && jsonEnd > jsonStart ? stdout.slice(jsonStart, jsonEnd + 1) : stdout;
-      parsed = JSON.parse(jsonSlice);
-    } catch {
-      throw classifyStderrError(stderr || "Extractor returned non-JSON output.");
-    }
-    const rawFormats = Array.isArray(parsed.formats) ? parsed.formats : [
-      {
-        format_id: String(parsed.format_id || "default"),
-        ext: String(parsed.ext || "mp4"),
-        vcodec: String(parsed.vcodec || "h264"),
-        acodec: String(parsed.acodec || "aac"),
-        height: typeof parsed.height === "number" ? parsed.height : null,
-        width: typeof parsed.width === "number" ? parsed.width : null,
-        fps: typeof parsed.fps === "number" ? parsed.fps : null,
-        filesize: typeof parsed.filesize === "number" ? parsed.filesize : null
+    let { parsed, formats } = this.parseAnalysisJson(result.stdout, result.stderr);
+    const parsedUrl = new URL(url);
+    const isYouTubeHost = parsedUrl.hostname.includes("youtube.com") || parsedUrl.hostname.includes("youtu.be");
+    const maxVideoHeight = formats.reduce((max, f) => Math.max(max, f.height || 0), 0);
+    if (isYouTubeHost && maxVideoHeight <= 360 && winningAuthArgs.includes("--no-cookies") && (!settings || settings.cookiesFromBrowser !== "none")) {
+      const candidateBrowsers = settings?.cookiesFromBrowser && settings.cookiesFromBrowser !== "auto" ? [settings.cookiesFromBrowser] : ["firefox", "edge", "chrome", "brave"];
+      for (const browser of candidateBrowsers) {
+        try {
+          const browserArgs = ["--cookies-from-browser", browser];
+          const upgradeRes = await this.runYtDlpAnalyzeAttempt(
+            binStatus.ytDlp.resolvedPath,
+            url,
+            browserArgs,
+            18e3,
+            winningProxyUrl
+          );
+          const candidateParsed = this.parseAnalysisJson(upgradeRes.stdout, upgradeRes.stderr);
+          const candidateMaxHeight = candidateParsed.formats.reduce(
+            (max, f) => Math.max(max, f.height || 0),
+            0
+          );
+          if (candidateMaxHeight > maxVideoHeight) {
+            parsed = candidateParsed.parsed;
+            formats = candidateParsed.formats;
+            winningAuthArgs = browserArgs;
+            authDiagnosticNote = `Unlocked HD (${candidateMaxHeight}p) via local ${browser} session.`;
+            break;
+          }
+        } catch {
+        }
       }
-    ];
-    const formats = normalizeYtDlpFormats(rawFormats);
+    }
     if (formats.length === 0) {
       throw new AppError(
         "UNAVAILABLE_MEDIA" /* UNAVAILABLE_MEDIA */,
         "No downloadable media formats were returned by the source."
       );
     }
-    const parsedUrl = new URL(url);
     const availableResolutions = Array.from(
       new Set(formats.filter((f) => f.height !== null).map((f) => `${f.height}p`))
     );
@@ -3537,6 +3927,9 @@ var YtDlpExtractor = class {
     );
     const analysisId = `anl_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     this.sessionAuthArgs.set(analysisId, winningAuthArgs);
+    if (winningProxyUrl) {
+      this.sessionProxyUrl.set(analysisId, winningProxyUrl);
+    }
     const diagnosticMessages = [
       `Extractor "${typeof parsed.extractor_key === "string" ? parsed.extractor_key : "generic"}" returned ${formats.length} stream format(s).`
     ];
@@ -3568,7 +3961,15 @@ var YtDlpExtractor = class {
     if (!binStatus.ytDlp.available || !binStatus.ytDlp.resolvedPath) {
       throw new AppError("PACKAGING_DEPENDENCY_ERROR" /* PACKAGING_DEPENDENCY_ERROR */, "yt-dlp binary is unavailable.");
     }
-    const formatExpr = selectedFormat.requiresMerge && selectedAudioFormat ? `${selectedFormat.formatId}+${selectedAudioFormat.formatId}` : selectedFormat.formatId;
+    let formatExpr = selectedFormat.requiresMerge && selectedAudioFormat ? `${selectedFormat.formatId}+${selectedAudioFormat.formatId}` : selectedFormat.formatId;
+    if (selectedFormat.height && selectedFormat.hasVideo) {
+      const h = selectedFormat.height;
+      if (selectedFormat.requiresMerge) {
+        formatExpr = `${formatExpr}/${selectedFormat.formatId}+bestaudio/bestvideo[height=${h}]+bestaudio/best[height=${h}]`;
+      } else {
+        formatExpr = `${formatExpr}/best[height=${h}]/bestvideo[height=${h}]+bestaudio`;
+      }
+    }
     const tempTemplate = resolveSafeChildPath(options.tempDir, "stream_%(id)s.%(ext)s");
     const maxFileSizeArg = `${Math.max(
       10,
@@ -3576,16 +3977,18 @@ var YtDlpExtractor = class {
     )}M`;
     const settings = this.getSettings?.();
     const authArgs = this.sessionAuthArgs.get(analysis.analysisId) || this.getInitialCookieArgs(settings);
-    const networkArgs = this.getNetworkAndSiteArgs(analysis.sourceUrl, settings);
+    const sessionProxy = this.sessionProxyUrl.get(analysis.analysisId) || null;
+    const networkArgs = this.getNetworkAndSiteArgs(analysis.sourceUrl, settings, sessionProxy);
+    const jsRuntimeSpec = this.binaryManager.ensureJsRuntimeSpec();
     const args = [
       "--no-playlist",
       "--newline",
       "--no-check-certificates",
       "--geo-bypass",
       "--js-runtimes",
-      "node",
+      jsRuntimeSpec,
       "--extractor-args",
-      "youtube:player_client=default,mweb,tv_simply,android_vr",
+      YOUTUBE_EXTRACTOR_ARGS,
       ...networkArgs,
       ...authArgs,
       "--max-filesize",
@@ -3739,7 +4142,7 @@ var AppBackendContainer = class {
     const baseUserDir = options?.dataDir || import_node_path10.default.join(process.cwd(), ".uvd-data");
     this.dataDir = baseUserDir;
     this.downloadsDir = options?.downloadsDir || import_node_path10.default.join(baseUserDir, "Downloads");
-    this.tempDir = options?.tempDir || import_node_path10.default.join(import_node_os.default.tmpdir(), "universal-video-downloader-temp");
+    this.tempDir = options?.tempDir || import_node_path10.default.join(import_node_os2.default.tmpdir(), "universal-video-downloader-temp");
     this.mediaRootDir = import_node_path10.default.join(baseUserDir, "test-media");
     this.localMediaPort = options?.localTestServerPort ?? 3e3;
     const dbPath = import_node_path10.default.join(this.dataDir, "uvd_metadata.sqlite");
@@ -3790,7 +4193,7 @@ var AppBackendContainer = class {
   }
   async startEmbeddedLocalMediaServer() {
     if (this.embeddedServer) return;
-    const server = import_node_http3.default.createServer((req, res) => {
+    const server = import_node_http4.default.createServer((req, res) => {
       if (!req.url || !req.url.startsWith("/local-media/")) {
         res.writeHead(404);
         res.end("Not found");

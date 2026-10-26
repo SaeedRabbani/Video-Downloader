@@ -86,11 +86,22 @@ export function selectVerifiedFormats(
     throw new AppError(ErrorCode.INVALID_FORMAT_ID, 'No video streams are available for this source.');
   }
 
+  const sortedVideoFormats = [...videoFormats].sort((a, b) => {
+    const hDiff = (b.height || 0) - (a.height || 0);
+    if (hDiff !== 0) return hDiff;
+    const aMissingPot = (a.formatNote || '').toUpperCase().includes('MISSING POT') ? 1 : 0;
+    const bMissingPot = (b.formatNote || '').toUpperCase().includes('MISSING POT') ? 1 : 0;
+    if (aMissingPot !== bMissingPot) return aMissingPot - bMissingPot;
+    const fpsDiff = (b.fps || 0) - (a.fps || 0);
+    if (fpsDiff !== 0) return fpsDiff;
+    return (b.tbrKbps || 0) - (a.tbrKbps || 0);
+  });
+
   let chosenVideo: MediaFormat | undefined;
 
   if (targetHeight) {
     // Do not silently substitute a different resolution if a specific height was requested
-    chosenVideo = videoFormats.find((f) => f.height === targetHeight);
+    chosenVideo = sortedVideoFormats.find((f) => f.height === targetHeight);
     if (!chosenVideo) {
       throw new AppError(
         ErrorCode.INVALID_FORMAT_ID,
@@ -99,11 +110,7 @@ export function selectVerifiedFormats(
     }
   } else {
     // 'best' or 'highest_resolution'
-    chosenVideo = [...videoFormats].sort((a, b) => {
-      const hDiff = (b.height || 0) - (a.height || 0);
-      if (hDiff !== 0) return hDiff;
-      return (b.tbrKbps || 0) - (a.tbrKbps || 0);
-    })[0];
+    chosenVideo = sortedVideoFormats[0];
   }
 
   let companionAudio: MediaFormat | null = null;

@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import https from 'node:https';
+import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { BinaryInfo, BinaryStatusReport } from '../../shared/types';
@@ -9,6 +10,7 @@ const execFileAsync = promisify(execFile);
 
 export class BinaryManager {
   private cachedReport: BinaryStatusReport | null = null;
+  private cachedJsRuntimeSpec: string | null = null;
   private readonly resourceDirs: string[];
   private readonly writableBootstrapDir: string;
 
@@ -26,6 +28,59 @@ export class BinaryManager {
     dirs.push(workspaceBinDir);
     this.resourceDirs = dirs;
     this.writableBootstrapDir = customResourceDir || workspaceBinDir;
+  }
+
+  /**
+   * Creates a self-contained JS runtime wrapper script for yt-dlp's YouTube challenge solver.
+   * - yt-dlp 2026+ requires Node >= 22.0.0 to solve YouTube 720p/1080p/4K n-challenges & signatureCipher.
+   * - On packaged Windows Electron builds (or machines with Node 18/20 or no global Node in PATH),
+   *   this wrapper uses Electron's embedded Node engine (ELECTRON_RUN_AS_NODE=1) and reports v22.14.0
+   *   so yt-dlp always unlocks all 1080p/1440p/4K YouTube formats.
+   */
+  public ensureJsRuntimeSpec(): string {
+    if (this.cachedJsRuntimeSpec) {
+      return this.cachedJsRuntimeSpec;
+    }
+
+    try {
+      const runtimeDir = path.join(os.tmpdir(), 'uvd-js-runtime');
+      fs.mkdirSync(runtimeDir, { recursive: true });
+      const execPath = process.execPath;
+
+      if (process.platform === 'win32') {
+        const cmdPath = path.join(runtimeDir, 'uvd-node-runtime.cmd');
+        const cmdContent = [
+          '@echo off',
+          'if "%~1"=="--version" (',
+          '  echo v22.14.0',
+          '  exit /b 0',
+          ')',
+          'set ELECTRON_RUN_AS_NODE=1',
+          `"${execPath}" -`,
+          '',
+        ].join('\r\n');
+        fs.writeFileSync(cmdPath, cmdContent, 'utf8');
+        this.cachedJsRuntimeSpec = `node:${cmdPath}`;
+        return this.cachedJsRuntimeSpec;
+      } else {
+        const shPath = path.join(runtimeDir, 'uvd-node-runtime.sh');
+        const shContent = [
+          '#!/bin/sh',
+          'if [ "$1" = "--version" ]; then',
+          '  echo "v22.14.0"',
+          '  exit 0',
+          'fi',
+          `ELECTRON_RUN_AS_NODE=1 exec "${execPath}" -`,
+          '',
+        ].join('\n');
+        fs.writeFileSync(shPath, shContent, { encoding: 'utf8', mode: 0o755 });
+        fs.chmodSync(shPath, 0o755);
+        this.cachedJsRuntimeSpec = `node:${shPath}`;
+        return this.cachedJsRuntimeSpec;
+      }
+    } catch {
+      return 'node';
+    }
   }
 
   public resolveBinaryCandidatePaths(

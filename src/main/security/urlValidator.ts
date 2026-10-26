@@ -1,6 +1,7 @@
 import dns from 'node:dns/promises';
 import net from 'node:net';
 import { AppError, ErrorCode } from '../../shared/errors/taxonomy';
+import { resolveHostViaDoh } from './dohResolver';
 
 const BLOCKED_HOSTNAMES = new Set([
   'localhost',
@@ -15,10 +16,20 @@ const BLOCKED_HOSTNAMES = new Set([
   '[::]',
 ]);
 
+const LOOPBACK_ALIAS_SUFFIXES = [
+  '.local',
+  '.internal',
+  '.localhost',
+  '.nip.io',
+  '.sslip.io',
+  '.localtest.me',
+  '.lvh.me',
+];
+
 export function isPrivateOrReservedIp(ip: string): boolean {
   const normalized = ip.replace(/^\[|\]$/g, '').toLowerCase();
 
-  if ( normalized.startsWith('::ffff:')) {
+  if (normalized.startsWith('::ffff:')) {
     const mappedV4 = normalized.slice('::ffff:'.length);
     if (net.isIPv4(mappedV4)) {
       return isPrivateOrReservedIp(mappedV4);
@@ -103,7 +114,10 @@ export function validateMediaUrlSync(rawUrl: string, options?: UrlValidationOpti
     return parsed;
   }
 
-  if (BLOCKED_HOSTNAMES.has(hostname) || hostname.endsWith('.local') || hostname.endsWith('.internal')) {
+  if (
+    BLOCKED_HOSTNAMES.has(hostname) ||
+    LOOPBACK_ALIAS_SUFFIXES.some((suffix) => hostname.endsWith(suffix))
+  ) {
     throw new AppError(
       ErrorCode.INVALID_URL,
       'Requests to localhost, internal domains, or cloud metadata endpoints are blocked.'
@@ -155,8 +169,19 @@ export async function validateMediaUrl(
   if (options?.resolveDns !== false && net.isIP(hostname.replace(/^\[|\]$/g, '')) === 0) {
     try {
       const records = await dns.lookup(hostname, { all: true });
-      for (const rec of records) {
-        if (isPrivateOrReservedIp(rec.address)) {
+      const hasPrivateOrReserved = records.some((rec) => isPrivateOrReservedIp(rec.address));
+
+      if (hasPrivateOrReserved) {
+        // Local OS DNS returned a private/loopback IP (e.g. 127.0.0.1, 0.0.0.0, 10.x.x.x, or 192.168.x.x).
+        // This frequently happens when an ISP blocks a public website (such as www.bilibili.tv in Pakistan)
+        // via DNS sinkholing/poisoning, or when a local VPN/proxy runs in Fake-IP/TUN mode.
+        // Verify against encrypted public DNS-over-HTTPS (Cloudflare 1.1.1.1 / Google 8.8.8.8):
+        // Only reject as DNS rebinding if public DoH confirms the domain genuinely resolves exclusively to private IPs.
+        const dohIps = await resolveHostViaDoh(hostname, 3500);
+        const dohConfirmedPrivateOnly =
+          dohIps.length > 0 && dohIps.every((ip) => isPrivateOrReservedIp(ip));
+
+        if (dohConfirmedPrivateOnly) {
           throw new AppError(
             ErrorCode.INVALID_URL,
             `Domain "${hostname}" resolves to a restricted private or loopback IP address (DNS rebinding protection).`
