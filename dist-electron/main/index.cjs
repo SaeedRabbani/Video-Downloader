@@ -23,7 +23,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 
 // src/main/index.ts
 var import_electron3 = require("electron");
-var import_node_fs13 = __toESM(require("node:fs"), 1);
+var import_node_fs14 = __toESM(require("node:fs"), 1);
 var import_node_path12 = __toESM(require("node:path"), 1);
 
 // src/main/ipc/handlers.ts
@@ -4406,6 +4406,7 @@ var AppBackendContainer = class {
 
 // src/main/windows/mainWindow.ts
 var import_electron2 = require("electron");
+var import_node_fs13 = __toESM(require("node:fs"), 1);
 var import_node_path11 = __toESM(require("node:path"), 1);
 
 // src/main/security/csp.ts
@@ -4431,7 +4432,38 @@ function isAllowedNavigationUrl(targetUrl, allowedOrigin) {
   }
 }
 
+// src/shared/branding.ts
+var APP_BRANDING = {
+  /** Application title shown in the custom header bar and window title */
+  appName: "Universal Video Downloader",
+  /** Full edition title shown on the About page */
+  editionTitle: "Universal Video Downloader \u2014 Windows Desktop Edition",
+  /** Version string displayed in the UI */
+  version: "1.0.0",
+  /** Relative path to the logo inside `/public` (works in both web dev server and packaged Electron `.exe`) */
+  logoPath: "./logo.svg",
+  /** Fallback PNG icon inside `/public` */
+  iconPath: "./icon.png"
+};
+
 // src/main/windows/mainWindow.ts
+function resolveWindowIconPath() {
+  const appPath = import_electron2.app.getAppPath();
+  const candidates = [
+    import_node_path11.default.join(appPath, "dist", "icon.ico"),
+    import_node_path11.default.join(appPath, "dist", "icon.png"),
+    import_node_path11.default.join(appPath, "public", "icon.ico"),
+    import_node_path11.default.join(appPath, "public", "icon.png"),
+    import_node_path11.default.resolve(process.cwd(), "public", "icon.ico"),
+    import_node_path11.default.resolve(process.cwd(), "public", "icon.png")
+  ];
+  for (const candidate of candidates) {
+    if (import_node_fs13.default.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return void 0;
+}
 function createMainWindow(preloadPath, rendererUrlOrFile) {
   import_electron2.session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     callback({
@@ -4441,6 +4473,7 @@ function createMainWindow(preloadPath, rendererUrlOrFile) {
       }
     });
   });
+  const iconPath = resolveWindowIconPath();
   const mainWindow2 = new import_electron2.BrowserWindow({
     width: 1440,
     height: 900,
@@ -4448,7 +4481,8 @@ function createMainWindow(preloadPath, rendererUrlOrFile) {
     minHeight: 680,
     frame: false,
     autoHideMenuBar: true,
-    title: "Universal Video Downloader",
+    title: APP_BRANDING.appName,
+    ...iconPath ? { icon: iconPath } : {},
     backgroundColor: "#020617",
     show: false,
     webPreferences: {
@@ -4487,14 +4521,14 @@ var mainWindow = null;
 var backendContainer = null;
 function resolvePreloadScriptPath() {
   const cjsCandidate = import_node_path12.default.join(__dirname, "../preload/index.cjs");
-  if (import_node_fs13.default.existsSync(cjsCandidate)) {
+  if (import_node_fs14.default.existsSync(cjsCandidate)) {
     return cjsCandidate;
   }
   return import_node_path12.default.join(__dirname, "../preload/index.js");
 }
 function resolveRendererHtmlPath() {
   const relativeDist = import_node_path12.default.join(__dirname, "../../dist/index.html");
-  if (import_node_fs13.default.existsSync(relativeDist)) {
+  if (import_node_fs14.default.existsSync(relativeDist)) {
     return relativeDist;
   }
   return import_node_path12.default.join(import_electron3.app.getAppPath(), "dist/index.html");

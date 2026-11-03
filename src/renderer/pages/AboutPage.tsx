@@ -7,6 +7,7 @@ import {
   Scale,
 } from 'lucide-react';
 import { BinaryStatusReport } from '../../shared/types';
+import { APP_BRANDING } from '../../shared/branding';
 
 interface AboutPageProps {
   binaryStatus: BinaryStatusReport | null;
@@ -19,13 +20,20 @@ export const AboutPage: React.FC<AboutPageProps> = ({ binaryStatus }) => {
 
   return (
     <div className="h-full min-h-0 space-y-6 overflow-y-auto pr-1">
-      <div>
-        <h1 className="text-xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
-          About Universal Video Downloader — Windows Desktop Edition
-        </h1>
-        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-          Version 1.0.0 (x64 Windows Desktop Architecture) · Electron + React + TypeScript + SQLite + FFmpeg + yt-dlp
-        </p>
+      <div className="flex items-center gap-3.5">
+        <img
+          src={APP_BRANDING.logoPath}
+          alt={`${APP_BRANDING.appName} logo`}
+          className="h-12 w-12 shrink-0 rounded-xl object-contain shadow-sm"
+        />
+        <div>
+          <h1 className="text-xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
+            About {APP_BRANDING.editionTitle}
+          </h1>
+          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+            Version {APP_BRANDING.version} (x64 Windows Desktop Architecture) · Electron + React + TypeScript + SQLite + FFmpeg + yt-dlp
+          </p>
+        </div>
       </div>
 
       {/* Runtime Binary Verification Status */}

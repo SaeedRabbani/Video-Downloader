@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Download, Minus, Square, X, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { NavSection } from '../hooks/useDownloaderState';
 import { ipcClient } from '../services/ipcClient';
+import { APP_BRANDING } from '../../shared/branding';
 
 interface TopBarProps {
   activeSection: NavSection;
@@ -15,6 +16,8 @@ export const TopBar: React.FC<TopBarProps> = ({
   isSidebarCollapsed,
   onToggleSidebar,
 }) => {
+  const [logoError, setLogoError] = useState(false);
+
   return (
     <header className="app-drag-region flex h-10 shrink-0 select-none items-center justify-between border-b border-slate-200 bg-white pl-3 pr-0 dark:border-slate-800 dark:bg-slate-900">
       {/* Left: Sidebar Minimize Toggle + Application Logo & Title */}
@@ -38,11 +41,20 @@ export const TopBar: React.FC<TopBarProps> = ({
           onClick={() => onSelectSection('home')}
           className="flex items-center gap-2 text-left focus:outline-none"
         >
-          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-sky-600 text-white">
-            <Download className="h-3.5 w-3.5" />
-          </span>
+          {!logoError ? (
+            <img
+              src={APP_BRANDING.logoPath}
+              alt={`${APP_BRANDING.appName} logo`}
+              onError={() => setLogoError(true)}
+              className="h-6 w-6 shrink-0 rounded-md object-contain"
+            />
+          ) : (
+            <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-sky-600 text-white">
+              <Download className="h-3.5 w-3.5" />
+            </span>
+          )}
           <span className="font-display text-xs font-bold tracking-tight text-slate-900 whitespace-nowrap dark:text-slate-100">
-            Universal Video Downloader
+            {APP_BRANDING.appName}
           </span>
         </button>
       </div>

@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" fill="none">
+  <!-- Dummy Brand Logo — Replace this file (/public/logo.svg) with your own SVG or PNG logo -->
+  <defs>
+    <linearGradient id="brandBg" x1="0" y1="0" x2="256" y2="256" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0284C7" />
+      <stop offset="100%" stop-color="#1E3A8A" />
+    </linearGradient>
+    <linearGradient id="brandAccent" x1="64" y1="56" x2="192" y2="200" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38BDF8" />
+      <stop offset="100%" stop-color="#E0F2FE" />
+    </linearGradient>
+  </defs>
+
+  <!-- Outer Rounded App Tile -->
+  <rect x="12" y="12" width="232" height="232" rx="52" fill="url(#brandBg)" stroke="#38BDF8" stroke-width="6" stroke-opacity="0.35" />
+
+  <!-- Play / Media Polygon Frame -->
+  <circle cx="128" cy="128" r="78" stroke="url(#brandAccent)" stroke-width="10" stroke-opacity="0.3" />
+
+  <!-- Central Download Arrow -->
+  <path
+    d="M128 64V152M128 152L92 116M128 152L164 116"
+    stroke="#FFFFFF"
+    stroke-width="18"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+
+  <!-- Bottom Tray Bar -->
+  <path
+    d="M76 184H180"
+    stroke="#38BDF8"
+    stroke-width="16"
+    stroke-linecap="round"
+  />
+</svg>

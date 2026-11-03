@@ -42,5 +42,26 @@
     "tsx": "^4.21.0",
     "typescript": "^7.0.2",
     "vitest": "^5.0.5"
+  },
+  "build": {
+    "appId": "com.uvd.desktop",
+    "productName": "Universal Video Downloader",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "public/icon.ico",
+      "public/icon.png",
+      "public/logo.svg",
+      "package.json"
+    ],
+    "win": {
+      "icon": "public/icon.ico",
+      "target": [
+        "nsis"
+      ]
+    }
   }
 }

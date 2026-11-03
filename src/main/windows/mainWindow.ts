@@ -1,6 +1,26 @@
-import { BrowserWindow, session } from 'electron';
+import { app, BrowserWindow, session } from 'electron';
+import fs from 'node:fs';
 import path from 'node:path';
 import { CONTENT_SECURITY_POLICY, isAllowedNavigationUrl } from '../security/csp';
+import { APP_BRANDING } from '../../shared/branding';
+
+function resolveWindowIconPath(): string | undefined {
+  const appPath = app.getAppPath();
+  const candidates = [
+    path.join(appPath, 'dist', 'icon.ico'),
+    path.join(appPath, 'dist', 'icon.png'),
+    path.join(appPath, 'public', 'icon.ico'),
+    path.join(appPath, 'public', 'icon.png'),
+    path.resolve(process.cwd(), 'public', 'icon.ico'),
+    path.resolve(process.cwd(), 'public', 'icon.png'),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
 
 export function createMainWindow(preloadPath: string, rendererUrlOrFile: string): BrowserWindow {
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
@@ -12,6 +32,8 @@ export function createMainWindow(preloadPath: string, rendererUrlOrFile: string)
     });
   });
 
+  const iconPath = resolveWindowIconPath();
+
   const mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -19,7 +41,8 @@ export function createMainWindow(preloadPath: string, rendererUrlOrFile: string)
     minHeight: 680,
     frame: false,
     autoHideMenuBar: true,
-    title: 'Universal Video Downloader',
+    title: APP_BRANDING.appName,
+    ...(iconPath ? { icon: iconPath } : {}),
     backgroundColor: '#020617',
     show: false,
     webPreferences: {
