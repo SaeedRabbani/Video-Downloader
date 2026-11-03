@@ -133,6 +133,8 @@ export interface RawYtDlpFormat {
   format_note?: string;
   resolution?: string;
   protocol?: string;
+  url?: string;
+  manifest_url?: string;
 }
 
 export function normalizeYtDlpFormats(rawFormats: RawYtDlpFormat[]): MediaFormat[] {
@@ -166,6 +168,13 @@ export function normalizeYtDlpFormats(rawFormats: RawYtDlpFormat[]): MediaFormat
         ? `${height}p`
         : raw.resolution || 'unknown';
 
+    const downloadUrl =
+      typeof raw.url === 'string' && /^https?:\/\//i.test(raw.url)
+        ? raw.url
+        : typeof raw.manifest_url === 'string' && /^https?:\/\//i.test(raw.manifest_url)
+        ? raw.manifest_url
+        : null;
+
     normalized.push({
       formatId: String(raw.format_id),
       extension: raw.ext || 'mp4',
@@ -196,6 +205,7 @@ export function normalizeYtDlpFormats(rawFormats: RawYtDlpFormat[]): MediaFormat
       hasAudio,
       requiresMerge: streamType === 'video_only',
       protocol: raw.protocol || 'https',
+      downloadUrl,
     });
   }
 
@@ -722,8 +732,14 @@ export class YtDlpExtractor implements ExtractorContract {
 
     if (selectedFormat.height && selectedFormat.hasVideo) {
       const h = selectedFormat.height;
+      const codecPrefix = selectedFormat.vcodec
+        ? selectedFormat.vcodec.split('.')[0]
+        : null;
+      const codecFilter = codecPrefix ? `[vcodec^=${codecPrefix}]` : '';
       if (selectedFormat.requiresMerge) {
-        formatExpr = `${formatExpr}/${selectedFormat.formatId}+bestaudio/bestvideo[height=${h}]+bestaudio/best[height=${h}]`;
+        formatExpr = codecFilter
+          ? `${formatExpr}/${selectedFormat.formatId}+bestaudio/bestvideo[height=${h}]${codecFilter}+bestaudio/bestvideo[height=${h}]+bestaudio/best[height=${h}]`
+          : `${formatExpr}/${selectedFormat.formatId}+bestaudio/bestvideo[height=${h}]+bestaudio/best[height=${h}]`;
       } else {
         formatExpr = `${formatExpr}/best[height=${h}]/bestvideo[height=${h}]+bestaudio`;
       }
@@ -745,6 +761,8 @@ export class YtDlpExtractor implements ExtractorContract {
 
     const args: string[] = [
       '--no-playlist',
+      '--continue',
+      '--part',
       '--newline',
       '--no-check-certificates',
       '--geo-bypass',

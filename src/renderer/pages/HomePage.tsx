@@ -42,12 +42,15 @@ interface HomePageProps {
   jobs: DownloadJob[];
   settings: AppSettings | null;
   sampleSources: SampleTestSource[];
+  onPauseJob: (jobId: string) => void;
+  onResumeJob: (jobId: string) => void;
   onCancelJob: (jobId: string) => void;
   onRetryJob: (jobId: string) => void;
   onOpenFile: (filePath: string) => void;
   onPreviewFile: (job: DownloadJob) => void;
   onOpenFolder: (filePath: string) => void;
   onNavigateDownloads: () => void;
+  onShowToast?: (text: string, type?: 'info' | 'error' | 'success') => void;
 }
 
 export function extractValidUrlsFromText(rawText: string): string[] {
@@ -91,14 +94,18 @@ export const HomePage: React.FC<HomePageProps> = ({
   jobs,
   settings,
   sampleSources,
+  onPauseJob,
+  onResumeJob,
   onCancelJob,
   onRetryJob,
   onOpenFile,
   onPreviewFile,
   onOpenFolder,
   onNavigateDownloads,
+  onShowToast,
 }) => {
   const [inputMode, setInputMode] = useState<'single' | 'bulk'>('single');
+  const [workspaceTab, setWorkspaceTab] = useState<'analysis' | 'queue'>('analysis');
   const [bulkText, setBulkText] = useState<string>('');
   const [bulkQuality, setBulkQuality] = useState<QualityPreset>(
     settings?.defaultResolution || 'best'
@@ -119,13 +126,15 @@ export const HomePage: React.FC<HomePageProps> = ({
     settings?.geoBypassCountry || 'auto'
   );
 
-  // Filter ONLY currently active/downloading jobs (never show completed/downloaded files here)
+  // Filter ONLY currently active/paused/downloading jobs (never show completed/downloaded files here)
   const activeDownloadingJobs = useMemo(() => {
     return jobs.filter(
       (j) =>
         j.state === 'queued' ||
         j.state === 'analyzing' ||
         j.state === 'downloading' ||
+        j.state === 'pausing' ||
+        j.state === 'paused' ||
         j.state === 'merging' ||
         j.state === 'converting' ||
         j.state === 'cancelling'
@@ -164,7 +173,10 @@ export const HomePage: React.FC<HomePageProps> = ({
       return;
     }
 
-    await onAnalyze(candidate);
+    const res = await onAnalyze(candidate);
+    if (res) {
+      setWorkspaceTab('analysis');
+    }
   };
 
   const handleBulkSubmit = async () => {
@@ -637,24 +649,33 @@ export const HomePage: React.FC<HomePageProps> = ({
 
       {/* Main Workspace Area Below Link Bar */}
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden">
-        {/* Optional Format Selector when a single URL has been analyzed */}
-        {currentAnalysis && (
+        {/* Format Selector when a single URL has been analyzed and analysis tab is active */}
+        {currentAnalysis && workspaceTab === 'analysis' ? (
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
             <AnalysisPanel
               analysis={currentAnalysis}
               settings={settings}
-              onStartDownload={onStartDownload}
+              onStartDownload={async (req) => {
+                await onStartDownload(req);
+                setWorkspaceTab('queue');
+              }}
+              onCloseAnalysis={() => {
+                if (activeDownloadingJobs.length > 0) {
+                  setWorkspaceTab('queue');
+                } else {
+                  onClearAnalysis();
+                }
+              }}
+              onShowToast={onShowToast}
             />
           </div>
-        )}
-
-        {/* Row of Current Downloading Files Only (Completed / Downloaded files are excluded) */}
-        {!currentAnalysis && (
+        ) : (
+          /* Row of Current Downloading Files Only (Completed / Downloaded files are excluded) */
           <section
             aria-label="Current Downloading Files"
             className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900"
           >
-            <div className="flex shrink-0 items-center justify-between gap-4 border-b border-slate-200 pb-3 dark:border-slate-800">
+            <div className="flex shrink-0 flex-wrap items-center justify-between gap-4 border-b border-slate-200 pb-3 dark:border-slate-800">
               <div className="flex items-center gap-2.5">
                 <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
                   Current Downloading Files
@@ -663,13 +684,28 @@ export const HomePage: React.FC<HomePageProps> = ({
                   ({activeDownloadingJobs.length} active)
                 </span>
               </div>
-              <button
-                type="button"
-                onClick={onNavigateDownloads}
-                className="text-xs font-medium text-sky-600 hover:underline whitespace-nowrap shrink-0 dark:text-sky-400"
-              >
-                Open Downloads Tab ({jobs.length})
-              </button>
+
+              <div className="flex items-center gap-3">
+                {currentAnalysis && (
+                  <button
+                    type="button"
+                    onClick={() => setWorkspaceTab('analysis')}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/60 bg-sky-50 px-2.5 py-1 text-xs font-medium text-sky-700 hover:bg-sky-100 whitespace-nowrap shrink-0 dark:bg-sky-950/50 dark:text-sky-300"
+                  >
+                    <Film className="h-3.5 w-3.5" />
+                    <span>
+                      Return to Format Selector ({currentAnalysis.formats.length} formats)
+                    </span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={onNavigateDownloads}
+                  className="text-xs font-medium text-sky-600 hover:underline whitespace-nowrap shrink-0 dark:text-sky-400"
+                >
+                  Open Downloads Tab ({jobs.length})
+                </button>
+              </div>
             </div>
 
             <div className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1">
@@ -688,11 +724,14 @@ export const HomePage: React.FC<HomePageProps> = ({
                     <DownloadCard
                       key={job.jobId}
                       job={job}
+                      onPause={onPauseJob}
+                      onResume={onResumeJob}
                       onCancel={onCancelJob}
                       onRetry={onRetryJob}
                       onOpenFile={onOpenFile}
                       onPreviewFile={onPreviewFile}
                       onOpenFolder={onOpenFolder}
+                      onShowToast={onShowToast}
                     />
                   ))}
                 </div>

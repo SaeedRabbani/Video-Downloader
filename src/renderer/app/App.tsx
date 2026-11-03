@@ -29,6 +29,8 @@ export function DesktopApp() {
           j.state === 'queued' ||
           j.state === 'analyzing' ||
           j.state === 'downloading' ||
+          j.state === 'pausing' ||
+          j.state === 'paused' ||
           j.state === 'merging' ||
           j.state === 'converting' ||
           j.state === 'cancelling'
@@ -140,12 +142,15 @@ export function DesktopApp() {
                 jobs={state.jobs}
                 settings={state.settings}
                 sampleSources={state.sampleSources}
+                onPauseJob={state.pauseJob}
+                onResumeJob={state.resumeJob}
                 onCancelJob={state.cancelJob}
                 onRetryJob={state.retryJob}
                 onOpenFile={handleOpenFile}
                 onPreviewFile={handlePreviewJob}
                 onOpenFolder={handleOpenFolder}
                 onNavigateDownloads={() => state.setActiveSection('downloads')}
+                onShowToast={state.showToast}
               />
             )}
 
@@ -153,12 +158,15 @@ export function DesktopApp() {
               <DownloadsPage
                 jobs={state.jobs}
                 maxConcurrent={state.settings?.maxConcurrentDownloads || 2}
+                onPauseJob={state.pauseJob}
+                onResumeJob={state.resumeJob}
                 onCancelJob={state.cancelJob}
                 onRetryJob={state.retryJob}
                 onRemoveJob={state.removeJob}
                 onOpenFile={handleOpenFile}
                 onPreviewFile={handlePreviewJob}
                 onOpenFolder={handleOpenFolder}
+                onShowToast={state.showToast}
               />
             )}
 

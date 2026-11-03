@@ -88,6 +88,34 @@ class DualModeIpcClient implements ElectronPreloadApi {
     });
   }
 
+  public async pauseJob(jobId: string): Promise<DownloadJob> {
+    if (this.nativeBridge) {
+      try {
+        return await this.nativeBridge.pauseJob(jobId);
+      } catch (err) {
+        this.unwrapElectronError(err);
+      }
+    }
+    return apiRequest<DownloadJob>('/api/downloads/pause', {
+      method: 'POST',
+      body: JSON.stringify({ jobId }),
+    });
+  }
+
+  public async resumeJob(jobId: string): Promise<DownloadJob> {
+    if (this.nativeBridge) {
+      try {
+        return await this.nativeBridge.resumeJob(jobId);
+      } catch (err) {
+        this.unwrapElectronError(err);
+      }
+    }
+    return apiRequest<DownloadJob>('/api/downloads/resume', {
+      method: 'POST',
+      body: JSON.stringify({ jobId }),
+    });
+  }
+
   public async cancelJob(jobId: string): Promise<DownloadJob> {
     if (this.nativeBridge) return this.nativeBridge.cancelJob(jobId);
     return apiRequest<DownloadJob>('/api/downloads/cancel', {

@@ -83,7 +83,7 @@ export class DirectHttpExtractor implements ExtractorContract {
       supportedProtocols: ['http', 'https'],
       supportsFormatListing: true,
       supportsSeparateStreams: true,
-      supportsResume: false,
+      supportsResume: true,
       supportsLiveStreams: false,
     };
   }
@@ -131,6 +131,7 @@ export class DirectHttpExtractor implements ExtractorContract {
           hasAudio: s.streamType !== 'video_only',
           requiresMerge: s.streamType === 'video_only',
           protocol: parsedUrl.protocol.replace(':', ''),
+          downloadUrl: resolvedStreamUrl,
         };
       });
 
@@ -219,6 +220,7 @@ export class DirectHttpExtractor implements ExtractorContract {
       hasAudio: Boolean(audioStream),
       requiresMerge: false,
       protocol: parsedUrl.protocol.replace(':', ''),
+      downloadUrl: parsedUrl.toString(),
     };
 
     return {
@@ -492,8 +494,18 @@ export class DirectHttpExtractor implements ExtractorContract {
     const parsed = await validateMediaUrl(targetUrl, this.urlValidationOptions);
     const client = parsed.protocol === 'https:' ? https : http;
 
+    const existingBytes =
+      fs.existsSync(destFilePath) && fs.statSync(destFilePath).isFile()
+        ? fs.statSync(destFilePath).size
+        : 0;
+
+    const headers: Record<string, string> = {};
+    if (existingBytes > 0) {
+      headers.Range = `bytes=${existingBytes}-`;
+    }
+
     return new Promise<void>((resolve, reject) => {
-      const req = client.get(parsed, { timeout: 25000, signal }, (res) => {
+      const req = client.get(parsed, { timeout: 25000, signal, headers }, (res) => {
         if (
           res.statusCode &&
           res.statusCode >= 300 &&
@@ -519,6 +531,14 @@ export class DirectHttpExtractor implements ExtractorContract {
           return;
         }
 
+        // 416 Range Not Satisfiable when file is already complete on disk
+        if (res.statusCode === 416 && existingBytes > 0) {
+          res.resume();
+          onTick(existingBytes, existingBytes, null, 0);
+          resolve();
+          return;
+        }
+
         if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
           res.resume();
           reject(
@@ -530,8 +550,12 @@ export class DirectHttpExtractor implements ExtractorContract {
           return;
         }
 
+        const isPartial = res.statusCode === 206 && existingBytes > 0;
+        const baseBytes = isPartial ? existingBytes : 0;
+
         const contentLengthHeader = res.headers['content-length'];
-        const totalBytes = contentLengthHeader ? parseInt(contentLengthHeader, 10) : null;
+        const responseBytes = contentLengthHeader ? parseInt(contentLengthHeader, 10) : null;
+        const totalBytes = responseBytes !== null ? baseBytes + responseBytes : null;
 
         if (totalBytes && totalBytes > maxBytes) {
           res.destroy();
@@ -544,12 +568,16 @@ export class DirectHttpExtractor implements ExtractorContract {
           return;
         }
 
-        const fileStream = fs.createWriteStream(destFilePath);
-        let downloadedBytes = 0;
+        const fileStream = fs.createWriteStream(destFilePath, {
+          flags: isPartial ? 'a' : 'w',
+        });
+        let downloadedBytes = baseBytes;
+        let sessionBytes = 0;
         const startTime = Date.now();
 
         res.on('data', (chunk: Buffer) => {
           downloadedBytes += chunk.length;
+          sessionBytes += chunk.length;
           if (downloadedBytes > maxBytes) {
             req.destroy();
             fileStream.destroy();
@@ -558,7 +586,7 @@ export class DirectHttpExtractor implements ExtractorContract {
           }
 
           const elapsedSec = Math.max(0.05, (Date.now() - startTime) / 1000);
-          const speed = Math.round(downloadedBytes / elapsedSec);
+          const speed = Math.round(sessionBytes / elapsedSec);
           const eta =
             totalBytes && speed > 0 ? Math.max(0, Math.round((totalBytes - downloadedBytes) / speed)) : null;
 

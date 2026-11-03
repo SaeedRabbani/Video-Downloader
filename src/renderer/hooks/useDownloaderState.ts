@@ -189,6 +189,32 @@ export function useDownloaderState() {
     [showToast]
   );
 
+  const pauseJob = useCallback(
+    async (jobId: string) => {
+      try {
+        const updated = await ipcClient.pauseJob(jobId);
+        setJobs((prev) => prev.map((j) => (j.jobId === jobId ? updated : j)));
+        showToast('Download paused. Partial data preserved for resume.', 'info');
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Failed to pause download.', 'error');
+      }
+    },
+    [showToast]
+  );
+
+  const resumeJob = useCallback(
+    async (jobId: string) => {
+      try {
+        const updated = await ipcClient.resumeJob(jobId);
+        setJobs((prev) => prev.map((j) => (j.jobId === jobId ? updated : j)));
+        showToast('Resuming download from saved progress...', 'success');
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Failed to resume download.', 'error');
+      }
+    },
+    [showToast]
+  );
+
   const cancelJob = useCallback(
     async (jobId: string) => {
       try {
@@ -305,6 +331,8 @@ export function useDownloaderState() {
     analyzeUrl,
     startDownload,
     bulkEnqueue,
+    pauseJob,
+    resumeJob,
     cancelJob,
     retryJob,
     removeJob,

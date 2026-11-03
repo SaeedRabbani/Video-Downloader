@@ -6,35 +6,46 @@ import {
   Square,
   FolderOpen,
   Play,
+  Pause,
+  PauseCircle,
   Download,
   Loader2,
   Clock,
   Film,
   Trash2,
+  Copy,
+  Check,
 } from 'lucide-react';
 import { DownloadJob } from '../../shared/types';
 import { formatBytes, formatEta, formatSpeed } from '../utils/formatters';
 
 interface DownloadCardProps {
   job: DownloadJob;
+  onPause?: (jobId: string) => void;
+  onResume?: (jobId: string) => void;
   onCancel: (jobId: string) => void;
   onRetry: (jobId: string) => void;
   onRemove?: (jobId: string) => void;
   onOpenFile: (filePath: string) => void;
   onPreviewFile: (job: DownloadJob) => void;
   onOpenFolder: (filePath: string) => void;
+  onShowToast?: (text: string, type?: 'info' | 'error' | 'success') => void;
 }
 
 export const DownloadCard: React.FC<DownloadCardProps> = ({
   job,
+  onPause,
+  onResume,
   onCancel,
   onRetry,
   onRemove,
   onOpenFile,
   onPreviewFile,
   onOpenFolder,
+  onShowToast,
 }) => {
   const [thumbFailed, setThumbFailed] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
 
   const isActive =
     job.state === 'queued' ||
@@ -42,9 +53,28 @@ export const DownloadCard: React.FC<DownloadCardProps> = ({
     job.state === 'downloading' ||
     job.state === 'merging' ||
     job.state === 'converting' ||
+    job.state === 'pausing' ||
     job.state === 'cancelling';
 
+  const isPaused = job.state === 'paused';
+  const canPause =
+    (job.state === 'downloading' || job.state === 'queued' || job.state === 'analyzing') &&
+    Boolean(onPause);
+  const canResume = job.state === 'paused' && Boolean(onResume);
   const canRetry = job.state === 'failed' || job.state === 'cancelled';
+
+  const linkToCopy = job.directDownloadUrl || job.url;
+
+  const handleCopyDownloadLink = async () => {
+    try {
+      await navigator.clipboard.writeText(linkToCopy);
+      setCopiedLink(true);
+      setTimeout(() => setCopiedLink(false), 2000);
+      onShowToast?.('Download link copied to clipboard.', 'success');
+    } catch {
+      onShowToast?.('Failed to copy download link.', 'error');
+    }
+  };
 
   const getStateLabel = () => {
     switch (job.state) {
@@ -54,6 +84,10 @@ export const DownloadCard: React.FC<DownloadCardProps> = ({
         return 'Analyzing';
       case 'downloading':
         return 'Downloading';
+      case 'pausing':
+        return 'Pausing...';
+      case 'paused':
+        return 'Paused';
       case 'merging':
         return 'Merging Streams (FFmpeg)';
       case 'converting':
@@ -110,6 +144,12 @@ export const DownloadCard: React.FC<DownloadCardProps> = ({
                   <span>{getStateLabel()}</span>
                 </span>
               )}
+              {isPaused && (
+                <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400">
+                  <PauseCircle className="h-3.5 w-3.5" />
+                  <span>{getStateLabel()}</span>
+                </span>
+              )}
               {isActive && (
                 <span className="inline-flex items-center gap-1 text-sky-600 dark:text-sky-400">
                   {job.state === 'queued' ? (
@@ -161,6 +201,8 @@ export const DownloadCard: React.FC<DownloadCardProps> = ({
                       ? 'bg-emerald-500'
                       : job.state === 'failed' || job.state === 'cancelled'
                       ? 'bg-red-500'
+                      : isPaused || job.state === 'pausing'
+                      ? 'bg-amber-500'
                       : 'bg-sky-500'
                   }`}
                   style={{
@@ -176,29 +218,68 @@ export const DownloadCard: React.FC<DownloadCardProps> = ({
             </span>
           </div>
 
-          {/* Stage / Error Message & Resume Capability Notice */}
+          {/* Stage / Error Message */}
           <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 text-xs">
             <span
               className={
                 job.userErrorMessage
                   ? 'text-red-600 dark:text-red-400'
+                  : isPaused
+                  ? 'text-amber-600 dark:text-amber-400'
                   : 'text-slate-500 dark:text-slate-400'
               }
             >
               {job.userErrorMessage || job.stageDescription}
             </span>
-
-            {!job.supportsResume && isActive && (
-              <span className="text-slate-400 dark:text-slate-500">
-                Direct stream (requires full restart if cancelled)
-              </span>
-            )}
           </div>
         </div>
 
         {/* Action Controls */}
         <div className="flex flex-wrap items-center gap-2 shrink-0">
-          {isActive && job.state !== 'cancelling' && (
+          {canPause && (
+            <button
+              type="button"
+              onClick={() => onPause?.(job.jobId)}
+              title="Pause download and preserve partial stream"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-800 transition-colors hover:bg-amber-100 whitespace-nowrap shrink-0 dark:border-amber-800/70 dark:bg-amber-950/40 dark:text-amber-300 dark:hover:bg-amber-900/50"
+            >
+              <Pause className="h-3.5 w-3.5" />
+              <span>Pause</span>
+            </button>
+          )}
+
+          {canResume && (
+            <button
+              type="button"
+              onClick={() => onResume?.(job.jobId)}
+              title="Resume download from saved progress"
+              className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-emerald-500 whitespace-nowrap shrink-0"
+            >
+              <Play className="h-3.5 w-3.5" />
+              <span>Resume</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={() => void handleCopyDownloadLink()}
+            title="Copy download link to clipboard"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 whitespace-nowrap shrink-0 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+          >
+            {copiedLink ? (
+              <>
+                <Check className="h-3.5 w-3.5 text-emerald-500" />
+                <span className="text-emerald-600 dark:text-emerald-400">Copied!</span>
+              </>
+            ) : (
+              <>
+                <Copy className="h-3.5 w-3.5" />
+                <span>Copy Link</span>
+              </>
+            )}
+          </button>
+
+          {(isActive || isPaused) && job.state !== 'cancelling' && (
             <button
               type="button"
               onClick={() => onCancel(job.jobId)}

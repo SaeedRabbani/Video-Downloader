@@ -16,6 +16,8 @@ export interface ElectronPreloadApi {
   analyzeUrl(url: string): Promise<MediaAnalysisResult>;
   startDownload(request: FormatSelectionRequest): Promise<DownloadJob>;
   bulkEnqueue(request: BulkQueueRequest): Promise<BulkQueueResult>;
+  pauseJob(jobId: string): Promise<DownloadJob>;
+  resumeJob(jobId: string): Promise<DownloadJob>;
   cancelJob(jobId: string): Promise<DownloadJob>;
   retryJob(jobId: string): Promise<DownloadJob>;
   removeJob(jobId: string): Promise<{ removed: boolean; jobId: string }>;

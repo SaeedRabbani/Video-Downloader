@@ -145,6 +145,8 @@ var IPC_CHANNELS = {
   ANALYZE_URL: "uvd:analyze-url",
   START_DOWNLOAD: "uvd:start-download",
   BULK_ENQUEUE: "uvd:bulk-enqueue",
+  PAUSE_JOB: "uvd:pause-job",
+  RESUME_JOB: "uvd:resume-job",
   CANCEL_JOB: "uvd:cancel-job",
   RETRY_JOB: "uvd:retry-job",
   REMOVE_JOB: "uvd:remove-job",
@@ -174,6 +176,8 @@ var ALLOWED_INVOKE_CHANNELS = /* @__PURE__ */ new Set([
   IPC_CHANNELS.ANALYZE_URL,
   IPC_CHANNELS.START_DOWNLOAD,
   IPC_CHANNELS.BULK_ENQUEUE,
+  IPC_CHANNELS.PAUSE_JOB,
+  IPC_CHANNELS.RESUME_JOB,
   IPC_CHANNELS.CANCEL_JOB,
   IPC_CHANNELS.RETRY_JOB,
   IPC_CHANNELS.REMOVE_JOB,
@@ -408,6 +412,12 @@ function registerElectronIpcHandlers(container, getMainWindow) {
   });
   handleSecure(IPC_CHANNELS.BULK_ENQUEUE, async (request) => {
     return await container.jobManager.bulkEnqueueUrls(request);
+  });
+  handleSecure(IPC_CHANNELS.PAUSE_JOB, async (jobId) => {
+    return await container.jobManager.pauseJob(jobId);
+  });
+  handleSecure(IPC_CHANNELS.RESUME_JOB, async (jobId) => {
+    return await container.jobManager.resumeJob(jobId);
   });
   handleSecure(IPC_CHANNELS.CANCEL_JOB, async (jobId) => {
     return await container.jobManager.cancelJob(jobId);
@@ -1273,11 +1283,23 @@ var ExtractorEngine = class {
 
 // src/main/jobs/stateMachine.ts
 var ALLOWED_TRANSITIONS = {
-  queued: /* @__PURE__ */ new Set(["analyzing", "downloading", "cancelling", "cancelled", "failed"]),
-  analyzing: /* @__PURE__ */ new Set(["downloading", "cancelling", "cancelled", "failed"]),
-  downloading: /* @__PURE__ */ new Set(["downloading", "merging", "converting", "completed", "cancelling", "cancelled", "failed"]),
+  queued: /* @__PURE__ */ new Set(["analyzing", "downloading", "pausing", "paused", "cancelling", "cancelled", "failed"]),
+  analyzing: /* @__PURE__ */ new Set(["downloading", "pausing", "paused", "cancelling", "cancelled", "failed"]),
+  downloading: /* @__PURE__ */ new Set([
+    "downloading",
+    "pausing",
+    "paused",
+    "merging",
+    "converting",
+    "completed",
+    "cancelling",
+    "cancelled",
+    "failed"
+  ]),
   merging: /* @__PURE__ */ new Set(["merging", "converting", "completed", "cancelling", "cancelled", "failed"]),
   converting: /* @__PURE__ */ new Set(["converting", "completed", "cancelling", "cancelled", "failed"]),
+  pausing: /* @__PURE__ */ new Set(["paused", "cancelling", "cancelled", "failed"]),
+  paused: /* @__PURE__ */ new Set(["queued", "downloading", "cancelling", "cancelled", "failed"]),
   cancelling: /* @__PURE__ */ new Set(["cancelled", "failed"]),
   completed: /* @__PURE__ */ new Set([]),
   // Terminal unless explicitly retried via resetForRetry
@@ -1323,7 +1345,14 @@ var JobManager = class extends import_node_events.EventEmitter {
   recoverPersistedJobsOnStartup() {
     const persisted = this.repositories.loadPersistedJobs();
     for (const job of persisted) {
-      if (!isTerminalJobState(job.state)) {
+      if (job.state === "paused" || job.state === "pausing") {
+        job.state = "paused";
+        job.speedBytesPerSec = null;
+        job.etaSeconds = null;
+        job.stageDescription = "Download paused \u2014 click Resume to continue";
+        job.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+        this.repositories.saveJobSnapshot(job);
+      } else if (!isTerminalJobState(job.state)) {
         job.state = "failed";
         job.errorCode = "INTERRUPTED_PROCESS" /* INTERRUPTED_PROCESS */;
         job.userErrorMessage = "Application restarted while this transfer was in progress. Click Retry to restart the download.";
@@ -1359,6 +1388,7 @@ var JobManager = class extends import_node_events.EventEmitter {
       jobId,
       analysisId: analysis.analysisId,
       url: analysis.sourceUrl,
+      directDownloadUrl: primaryFormat.downloadUrl || analysis.normalizedUrl || analysis.sourceUrl,
       title: analysis.title,
       thumbnailUrl: analysis.thumbnailUrl,
       platform: analysis.platform,
@@ -1446,13 +1476,96 @@ var JobManager = class extends import_node_events.EventEmitter {
       results
     };
   }
+  async pauseJob(jobId) {
+    const job = this.jobs.get(jobId);
+    if (!job) {
+      throw new AppError("INVALID_FORMAT_ID" /* INVALID_FORMAT_ID */, `Job "${jobId}" not found.`);
+    }
+    if (job.state === "paused" || job.state === "pausing") {
+      return job;
+    }
+    if (job.state === "queued") {
+      this.transitionState(job, "paused", "Download paused \u2014 click Resume to continue");
+      job.speedBytesPerSec = null;
+      job.etaSeconds = null;
+      job.errorCode = null;
+      job.userErrorMessage = null;
+      this.repositories.saveJobSnapshot(job);
+      this.emitProgress(job);
+      return job;
+    }
+    if (job.state !== "downloading" && job.state !== "analyzing") {
+      throw new AppError(
+        "INVALID_FORMAT_ID" /* INVALID_FORMAT_ID */,
+        "Only active or queued downloads can be paused."
+      );
+    }
+    this.transitionState(job, "pausing", "Pausing download and preserving partial data...");
+    this.emitProgress(job);
+    try {
+      const extractor = this.extractorEngine.getExtractorById(job.extractorId);
+      await extractor.cancel(jobId);
+    } catch {
+    }
+    if (canTransitionJobState(job.state, "paused")) {
+      this.transitionState(job, "paused", "Download paused \u2014 click Resume to continue");
+    }
+    job.speedBytesPerSec = null;
+    job.etaSeconds = null;
+    job.errorCode = null;
+    job.userErrorMessage = null;
+    this.repositories.saveJobSnapshot(job);
+    this.emitProgress(job);
+    return job;
+  }
+  async resumeJob(jobId) {
+    const job = this.jobs.get(jobId);
+    if (!job) {
+      throw new AppError("INVALID_FORMAT_ID" /* INVALID_FORMAT_ID */, `Job "${jobId}" not found.`);
+    }
+    if (job.state !== "paused") {
+      throw new AppError("INVALID_FORMAT_ID" /* INVALID_FORMAT_ID */, "Only paused downloads can be resumed.");
+    }
+    try {
+      this.extractorEngine.getStoredAnalysis(job.analysisId);
+    } catch {
+      const freshAnalysis = await this.extractorEngine.analyzeUrl(job.url);
+      job.analysisId = freshAnalysis.analysisId;
+      const savedReq = this.jobRequests.get(jobId);
+      if (savedReq) {
+        savedReq.analysisId = freshAnalysis.analysisId;
+      }
+    }
+    if (!this.jobRequests.has(jobId)) {
+      this.jobRequests.set(jobId, {
+        analysisId: job.analysisId,
+        url: job.url,
+        formatId: job.selectedFormatId,
+        audioFormatId: job.selectedAudioFormatId,
+        qualityPreset: "best",
+        targetContainer: job.selectedContainer || "mp4",
+        convertAudioTo: job.convertAudioTo,
+        preserveOriginal: true
+      });
+    }
+    this.completedJobIds.delete(jobId);
+    this.transitionState(job, "queued", "Queued to resume download...");
+    job.speedBytesPerSec = null;
+    job.etaSeconds = null;
+    job.errorCode = null;
+    job.userErrorMessage = null;
+    this.repositories.saveJobSnapshot(job);
+    this.emitProgress(job);
+    this.processQueue();
+    return job;
+  }
   async removeJob(jobId) {
     const job = this.jobs.get(jobId);
     if (!job) {
       this.repositories.removePersistedJob(jobId);
       return { removed: false, jobId };
     }
-    if (!isTerminalJobState(job.state)) {
+    if (!isTerminalJobState(job.state) && job.state !== "paused") {
       await this.cancelJob(jobId);
     }
     this.filesystemManager.cleanupJobTempDir(jobId);
@@ -1470,8 +1583,12 @@ var JobManager = class extends import_node_events.EventEmitter {
     if (isTerminalJobState(job.state)) {
       return job;
     }
-    if (job.state === "queued") {
-      this.transitionState(job, "cancelled", "Cancelled while in queue");
+    if (job.state === "queued" || job.state === "paused") {
+      this.transitionState(
+        job,
+        "cancelled",
+        job.state === "paused" ? "Cancelled while paused" : "Cancelled while in queue"
+      );
       job.errorCode = "CANCELLED_DOWNLOAD" /* CANCELLED_DOWNLOAD */;
       job.userErrorMessage = USER_ERROR_MESSAGES["CANCELLED_DOWNLOAD" /* CANCELLED_DOWNLOAD */];
       this.filesystemManager.cleanupJobTempDir(jobId);
@@ -1568,7 +1685,11 @@ var JobManager = class extends import_node_events.EventEmitter {
     try {
       const maxBytes = (settings.maxDownloadSizeMB || 4096) * 1024 * 1024;
       this.filesystemManager.verifyDiskSpace(outputDir, job.totalBytes || 32 * 1024 * 1024);
-      this.transitionState(job, "downloading", "Initializing media stream transfer...");
+      this.transitionState(
+        job,
+        "downloading",
+        job.downloadedBytes > 0 ? "Resuming media stream transfer..." : "Initializing media stream transfer..."
+      );
       this.emitProgress(job);
       const analysis = this.extractorEngine.getStoredAnalysis(job.analysisId);
       const req = this.jobRequests.get(job.jobId) || {
@@ -1596,7 +1717,9 @@ var JobManager = class extends import_node_events.EventEmitter {
           maxFileSizeBytes: maxBytes,
           ffmpegPath: binReport.ffmpeg.resolvedPath,
           onProgress: (tick) => {
-            if (job.state === "cancelling" || job.state === "cancelled") return;
+            if (job.state === "cancelling" || job.state === "cancelled" || job.state === "pausing" || job.state === "paused") {
+              return;
+            }
             if (tick.state !== job.state && canTransitionJobState(job.state, tick.state)) {
               this.transitionState(job, tick.state, tick.stageDescription);
             } else {
@@ -1613,6 +1736,9 @@ var JobManager = class extends import_node_events.EventEmitter {
           }
         }
       );
+      if (job.state === "pausing" || job.state === "paused" || job.state === "cancelling" || job.state === "cancelled") {
+        return;
+      }
       if (this.completedJobIds.has(job.jobId)) {
         return;
       }
@@ -1649,7 +1775,15 @@ var JobManager = class extends import_node_events.EventEmitter {
       });
       this.emitProgress(job);
     } catch (err) {
-      if (job.state === "cancelled" || err instanceof AppError && err.code === "CANCELLED_DOWNLOAD" /* CANCELLED_DOWNLOAD */) {
+      if (job.state === "pausing" || job.state === "paused") {
+        if (canTransitionJobState(job.state, "paused")) {
+          this.transitionState(job, "paused", "Download paused \u2014 click Resume to continue");
+        }
+        job.speedBytesPerSec = null;
+        job.etaSeconds = null;
+        job.errorCode = null;
+        job.userErrorMessage = null;
+      } else if (job.state === "cancelled" || job.state === "cancelling" || err instanceof AppError && err.code === "CANCELLED_DOWNLOAD" /* CANCELLED_DOWNLOAD */) {
         if (canTransitionJobState(job.state, "cancelled")) {
           this.transitionState(job, "cancelled", "Cancelled by user");
         }
@@ -1687,7 +1821,7 @@ var JobManager = class extends import_node_events.EventEmitter {
         this.emitProgress(job);
       }
     } finally {
-      if (settings.tempFileCleanupPolicy === "immediate") {
+      if (settings.tempFileCleanupPolicy === "immediate" && job.state !== "paused" && job.state !== "pausing") {
         this.filesystemManager.cleanupJobTempDir(job.jobId);
       }
     }
@@ -2322,7 +2456,7 @@ var DirectHttpExtractor = class {
       supportedProtocols: ["http", "https"],
       supportsFormatListing: true,
       supportsSeparateStreams: true,
-      supportsResume: false,
+      supportsResume: true,
       supportsLiveStreams: false
     };
   }
@@ -2364,7 +2498,8 @@ var DirectHttpExtractor = class {
           hasVideo: s.streamType !== "audio_only",
           hasAudio: s.streamType !== "video_only",
           requiresMerge: s.streamType === "video_only",
-          protocol: parsedUrl.protocol.replace(":", "")
+          protocol: parsedUrl.protocol.replace(":", ""),
+          downloadUrl: resolvedStreamUrl
         };
       });
       this.manifestUrlMap.set(analysisId, formatUrlTable2);
@@ -2437,7 +2572,8 @@ var DirectHttpExtractor = class {
       hasVideo: Boolean(videoStream),
       hasAudio: Boolean(audioStream),
       requiresMerge: false,
-      protocol: parsedUrl.protocol.replace(":", "")
+      protocol: parsedUrl.protocol.replace(":", ""),
+      downloadUrl: parsedUrl.toString()
     };
     return {
       analysisId,
@@ -2651,8 +2787,13 @@ var DirectHttpExtractor = class {
     }
     const parsed = await validateMediaUrl(targetUrl, this.urlValidationOptions);
     const client = parsed.protocol === "https:" ? import_node_https3.default : import_node_http2.default;
+    const existingBytes = import_node_fs7.default.existsSync(destFilePath) && import_node_fs7.default.statSync(destFilePath).isFile() ? import_node_fs7.default.statSync(destFilePath).size : 0;
+    const headers = {};
+    if (existingBytes > 0) {
+      headers.Range = `bytes=${existingBytes}-`;
+    }
     return new Promise((resolve, reject) => {
-      const req = client.get(parsed, { timeout: 25e3, signal }, (res) => {
+      const req = client.get(parsed, { timeout: 25e3, signal, headers }, (res) => {
         if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           res.resume();
           if (redirectsRemaining <= 0) {
@@ -2670,6 +2811,12 @@ var DirectHttpExtractor = class {
           ).then(resolve).catch(reject);
           return;
         }
+        if (res.statusCode === 416 && existingBytes > 0) {
+          res.resume();
+          onTick(existingBytes, existingBytes, null, 0);
+          resolve();
+          return;
+        }
         if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
           res.resume();
           reject(
@@ -2680,8 +2827,11 @@ var DirectHttpExtractor = class {
           );
           return;
         }
+        const isPartial = res.statusCode === 206 && existingBytes > 0;
+        const baseBytes = isPartial ? existingBytes : 0;
         const contentLengthHeader = res.headers["content-length"];
-        const totalBytes = contentLengthHeader ? parseInt(contentLengthHeader, 10) : null;
+        const responseBytes = contentLengthHeader ? parseInt(contentLengthHeader, 10) : null;
+        const totalBytes = responseBytes !== null ? baseBytes + responseBytes : null;
         if (totalBytes && totalBytes > maxBytes) {
           res.destroy();
           reject(
@@ -2692,11 +2842,15 @@ var DirectHttpExtractor = class {
           );
           return;
         }
-        const fileStream = import_node_fs7.default.createWriteStream(destFilePath);
-        let downloadedBytes = 0;
+        const fileStream = import_node_fs7.default.createWriteStream(destFilePath, {
+          flags: isPartial ? "a" : "w"
+        });
+        let downloadedBytes = baseBytes;
+        let sessionBytes = 0;
         const startTime = Date.now();
         res.on("data", (chunk) => {
           downloadedBytes += chunk.length;
+          sessionBytes += chunk.length;
           if (downloadedBytes > maxBytes) {
             req.destroy();
             fileStream.destroy();
@@ -2704,7 +2858,7 @@ var DirectHttpExtractor = class {
             return;
           }
           const elapsedSec = Math.max(0.05, (Date.now() - startTime) / 1e3);
-          const speed = Math.round(downloadedBytes / elapsedSec);
+          const speed = Math.round(sessionBytes / elapsedSec);
           const eta = totalBytes && speed > 0 ? Math.max(0, Math.round((totalBytes - downloadedBytes) / speed)) : null;
           onTick(downloadedBytes, totalBytes, speed, eta);
         });
@@ -2827,7 +2981,9 @@ var HlsDashExtractor = class {
       if (lines[i].startsWith("#EXT-X-STREAM-INF:")) {
         const nextLine = lines[i + 1];
         if (nextLine && !nextLine.startsWith("#") && formats[fIdx]) {
-          urlTable.set(formats[fIdx].formatId, new URL(nextLine, parsedUrl.toString()).toString());
+          const resolvedVariantUrl = new URL(nextLine, parsedUrl.toString()).toString();
+          urlTable.set(formats[fIdx].formatId, resolvedVariantUrl);
+          formats[fIdx].downloadUrl = resolvedVariantUrl;
           fIdx++;
         }
       }
@@ -2853,7 +3009,8 @@ var HlsDashExtractor = class {
         hasVideo: true,
         hasAudio: true,
         requiresMerge: false,
-        protocol: "m3u8_native"
+        protocol: "m3u8_native",
+        downloadUrl: parsedUrl.toString()
       };
       formats.push(fallbackFormat);
       urlTable.set(fallbackFormat.formatId, parsedUrl.toString());
@@ -3567,6 +3724,7 @@ function normalizeYtDlpFormats(rawFormats) {
     const height = typeof raw.height === "number" && raw.height > 0 ? raw.height : null;
     const width = typeof raw.width === "number" && raw.width > 0 ? raw.width : null;
     const resolution = streamType === "audio_only" ? "audio only" : height ? `${height}p` : raw.resolution || "unknown";
+    const downloadUrl = typeof raw.url === "string" && /^https?:\/\//i.test(raw.url) ? raw.url : typeof raw.manifest_url === "string" && /^https?:\/\//i.test(raw.manifest_url) ? raw.manifest_url : null;
     normalized.push({
       formatId: String(raw.format_id),
       extension: raw.ext || "mp4",
@@ -3587,7 +3745,8 @@ function normalizeYtDlpFormats(rawFormats) {
       hasVideo,
       hasAudio,
       requiresMerge: streamType === "video_only",
-      protocol: raw.protocol || "https"
+      protocol: raw.protocol || "https",
+      downloadUrl
     });
   }
   return normalized.sort((a, b) => {
@@ -3964,8 +4123,10 @@ var YtDlpExtractor = class {
     let formatExpr = selectedFormat.requiresMerge && selectedAudioFormat ? `${selectedFormat.formatId}+${selectedAudioFormat.formatId}` : selectedFormat.formatId;
     if (selectedFormat.height && selectedFormat.hasVideo) {
       const h = selectedFormat.height;
+      const codecPrefix = selectedFormat.vcodec ? selectedFormat.vcodec.split(".")[0] : null;
+      const codecFilter = codecPrefix ? `[vcodec^=${codecPrefix}]` : "";
       if (selectedFormat.requiresMerge) {
-        formatExpr = `${formatExpr}/${selectedFormat.formatId}+bestaudio/bestvideo[height=${h}]+bestaudio/best[height=${h}]`;
+        formatExpr = codecFilter ? `${formatExpr}/${selectedFormat.formatId}+bestaudio/bestvideo[height=${h}]${codecFilter}+bestaudio/bestvideo[height=${h}]+bestaudio/best[height=${h}]` : `${formatExpr}/${selectedFormat.formatId}+bestaudio/bestvideo[height=${h}]+bestaudio/best[height=${h}]`;
       } else {
         formatExpr = `${formatExpr}/best[height=${h}]/bestvideo[height=${h}]+bestaudio`;
       }
@@ -3982,6 +4143,8 @@ var YtDlpExtractor = class {
     const jsRuntimeSpec = this.binaryManager.ensureJsRuntimeSpec();
     const args = [
       "--no-playlist",
+      "--continue",
+      "--part",
       "--newline",
       "--no-check-certificates",
       "--geo-bypass",

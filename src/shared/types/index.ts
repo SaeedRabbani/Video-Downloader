@@ -19,6 +19,8 @@ export type JobState =
   | 'downloading'
   | 'merging'
   | 'converting'
+  | 'pausing'
+  | 'paused'
   | 'completed'
   | 'failed'
   | 'cancelling'
@@ -45,6 +47,7 @@ export interface MediaFormat {
   hasAudio: boolean;
   requiresMerge: boolean;
   protocol: string;
+  downloadUrl?: string | null;
 }
 
 export interface MediaAnalysisResult {
@@ -83,6 +86,7 @@ export interface DownloadJob {
   jobId: string;
   analysisId: string;
   url: string;
+  directDownloadUrl?: string | null;
   title: string;
   thumbnailUrl: string | null;
   platform: string;

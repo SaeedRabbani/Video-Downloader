@@ -43,7 +43,14 @@ export class JobManager extends EventEmitter {
   private recoverPersistedJobsOnStartup(): void {
     const persisted = this.repositories.loadPersistedJobs();
     for (const job of persisted) {
-      if (!isTerminalJobState(job.state)) {
+      if (job.state === 'paused' || job.state === 'pausing') {
+        job.state = 'paused';
+        job.speedBytesPerSec = null;
+        job.etaSeconds = null;
+        job.stageDescription = 'Download paused — click Resume to continue';
+        job.updatedAt = new Date().toISOString();
+        this.repositories.saveJobSnapshot(job);
+      } else if (!isTerminalJobState(job.state)) {
         job.state = 'failed';
         job.errorCode = ErrorCode.INTERRUPTED_PROCESS;
         job.userErrorMessage =
@@ -94,6 +101,7 @@ export class JobManager extends EventEmitter {
       jobId,
       analysisId: analysis.analysisId,
       url: analysis.sourceUrl,
+      directDownloadUrl: primaryFormat.downloadUrl || analysis.normalizedUrl || analysis.sourceUrl,
       title: analysis.title,
       thumbnailUrl: analysis.thumbnailUrl,
       platform: analysis.platform,
@@ -204,6 +212,105 @@ export class JobManager extends EventEmitter {
     };
   }
 
+  public async pauseJob(jobId: string): Promise<DownloadJob> {
+    const job = this.jobs.get(jobId);
+    if (!job) {
+      throw new AppError(ErrorCode.INVALID_FORMAT_ID, `Job "${jobId}" not found.`);
+    }
+
+    if (job.state === 'paused' || job.state === 'pausing') {
+      return job;
+    }
+
+    if (job.state === 'queued') {
+      this.transitionState(job, 'paused', 'Download paused — click Resume to continue');
+      job.speedBytesPerSec = null;
+      job.etaSeconds = null;
+      job.errorCode = null;
+      job.userErrorMessage = null;
+      this.repositories.saveJobSnapshot(job);
+      this.emitProgress(job);
+      return job;
+    }
+
+    if (job.state !== 'downloading' && job.state !== 'analyzing') {
+      throw new AppError(
+        ErrorCode.INVALID_FORMAT_ID,
+        'Only active or queued downloads can be paused.'
+      );
+    }
+
+    this.transitionState(job, 'pausing', 'Pausing download and preserving partial data...');
+    this.emitProgress(job);
+
+    try {
+      const extractor = this.extractorEngine.getExtractorById(job.extractorId);
+      await extractor.cancel(jobId);
+    } catch {
+      // Ignore process stop error
+    }
+
+    if (canTransitionJobState(job.state, 'paused')) {
+      this.transitionState(job, 'paused', 'Download paused — click Resume to continue');
+    }
+    job.speedBytesPerSec = null;
+    job.etaSeconds = null;
+    job.errorCode = null;
+    job.userErrorMessage = null;
+    this.repositories.saveJobSnapshot(job);
+    this.emitProgress(job);
+
+    return job;
+  }
+
+  public async resumeJob(jobId: string): Promise<DownloadJob> {
+    const job = this.jobs.get(jobId);
+    if (!job) {
+      throw new AppError(ErrorCode.INVALID_FORMAT_ID, `Job "${jobId}" not found.`);
+    }
+
+    if (job.state !== 'paused') {
+      throw new AppError(ErrorCode.INVALID_FORMAT_ID, 'Only paused downloads can be resumed.');
+    }
+
+    // Re-analyze if the analysis cache expired
+    try {
+      this.extractorEngine.getStoredAnalysis(job.analysisId);
+    } catch {
+      const freshAnalysis = await this.extractorEngine.analyzeUrl(job.url);
+      job.analysisId = freshAnalysis.analysisId;
+      const savedReq = this.jobRequests.get(jobId);
+      if (savedReq) {
+        savedReq.analysisId = freshAnalysis.analysisId;
+      }
+    }
+
+    if (!this.jobRequests.has(jobId)) {
+      this.jobRequests.set(jobId, {
+        analysisId: job.analysisId,
+        url: job.url,
+        formatId: job.selectedFormatId,
+        audioFormatId: job.selectedAudioFormatId,
+        qualityPreset: 'best',
+        targetContainer: (job.selectedContainer as FormatSelectionRequest['targetContainer']) || 'mp4',
+        convertAudioTo: job.convertAudioTo,
+        preserveOriginal: true,
+      });
+    }
+
+    this.completedJobIds.delete(jobId);
+    this.transitionState(job, 'queued', 'Queued to resume download...');
+    job.speedBytesPerSec = null;
+    job.etaSeconds = null;
+    job.errorCode = null;
+    job.userErrorMessage = null;
+    this.repositories.saveJobSnapshot(job);
+    this.emitProgress(job);
+    this.processQueue();
+
+    return job;
+  }
+
   public async removeJob(jobId: string): Promise<{ removed: boolean; jobId: string }> {
     const job = this.jobs.get(jobId);
     if (!job) {
@@ -211,7 +318,7 @@ export class JobManager extends EventEmitter {
       return { removed: false, jobId };
     }
 
-    if (!isTerminalJobState(job.state)) {
+    if (!isTerminalJobState(job.state) && job.state !== 'paused') {
       await this.cancelJob(jobId);
     }
 
@@ -234,8 +341,12 @@ export class JobManager extends EventEmitter {
       return job;
     }
 
-    if (job.state === 'queued') {
-      this.transitionState(job, 'cancelled', 'Cancelled while in queue');
+    if (job.state === 'queued' || job.state === 'paused') {
+      this.transitionState(
+        job,
+        'cancelled',
+        job.state === 'paused' ? 'Cancelled while paused' : 'Cancelled while in queue'
+      );
       job.errorCode = ErrorCode.CANCELLED_DOWNLOAD;
       job.userErrorMessage = USER_ERROR_MESSAGES[ErrorCode.CANCELLED_DOWNLOAD];
       this.filesystemManager.cleanupJobTempDir(jobId);
@@ -353,7 +464,13 @@ export class JobManager extends EventEmitter {
       const maxBytes = (settings.maxDownloadSizeMB || 4096) * 1024 * 1024;
       this.filesystemManager.verifyDiskSpace(outputDir, job.totalBytes || 32 * 1024 * 1024);
 
-      this.transitionState(job, 'downloading', 'Initializing media stream transfer...');
+      this.transitionState(
+        job,
+        'downloading',
+        job.downloadedBytes > 0
+          ? 'Resuming media stream transfer...'
+          : 'Initializing media stream transfer...'
+      );
       this.emitProgress(job);
 
       const analysis = this.extractorEngine.getStoredAnalysis(job.analysisId);
@@ -384,7 +501,14 @@ export class JobManager extends EventEmitter {
           maxFileSizeBytes: maxBytes,
           ffmpegPath: binReport.ffmpeg.resolvedPath,
           onProgress: (tick) => {
-            if (job.state === 'cancelling' || job.state === 'cancelled') return;
+            if (
+              job.state === 'cancelling' ||
+              job.state === 'cancelled' ||
+              job.state === 'pausing' ||
+              job.state === 'paused'
+            ) {
+              return;
+            }
             if (tick.state !== job.state && canTransitionJobState(job.state, tick.state)) {
               this.transitionState(job, tick.state, tick.stageDescription);
             } else {
@@ -401,6 +525,15 @@ export class JobManager extends EventEmitter {
           },
         }
       );
+
+      if (
+        (job.state as string) === 'pausing' ||
+        (job.state as string) === 'paused' ||
+        (job.state as string) === 'cancelling' ||
+        (job.state as string) === 'cancelled'
+      ) {
+        return;
+      }
 
       // Guard against duplicate completion events
       if (this.completedJobIds.has(job.jobId)) {
@@ -443,7 +576,19 @@ export class JobManager extends EventEmitter {
 
       this.emitProgress(job);
     } catch (err) {
-      if ((job.state as string) === 'cancelled' || (err instanceof AppError && err.code === ErrorCode.CANCELLED_DOWNLOAD)) {
+      if ((job.state as string) === 'pausing' || (job.state as string) === 'paused') {
+        if (canTransitionJobState(job.state, 'paused')) {
+          this.transitionState(job, 'paused', 'Download paused — click Resume to continue');
+        }
+        job.speedBytesPerSec = null;
+        job.etaSeconds = null;
+        job.errorCode = null;
+        job.userErrorMessage = null;
+      } else if (
+        (job.state as string) === 'cancelled' ||
+        (job.state as string) === 'cancelling' ||
+        (err instanceof AppError && err.code === ErrorCode.CANCELLED_DOWNLOAD)
+      ) {
         if (canTransitionJobState(job.state, 'cancelled')) {
           this.transitionState(job, 'cancelled', 'Cancelled by user');
         }
@@ -489,7 +634,11 @@ export class JobManager extends EventEmitter {
         this.emitProgress(job);
       }
     } finally {
-      if (settings.tempFileCleanupPolicy === 'immediate') {
+      if (
+        settings.tempFileCleanupPolicy === 'immediate' &&
+        (job.state as string) !== 'paused' &&
+        (job.state as string) !== 'pausing'
+      ) {
         this.filesystemManager.cleanupJobTempDir(job.jobId);
       }
     }

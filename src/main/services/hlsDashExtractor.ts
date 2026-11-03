@@ -126,7 +126,9 @@ export class HlsDashExtractor implements ExtractorContract {
       if (lines[i].startsWith('#EXT-X-STREAM-INF:')) {
         const nextLine = lines[i + 1];
         if (nextLine && !nextLine.startsWith('#') && formats[fIdx]) {
-          urlTable.set(formats[fIdx].formatId, new URL(nextLine, parsedUrl.toString()).toString());
+          const resolvedVariantUrl = new URL(nextLine, parsedUrl.toString()).toString();
+          urlTable.set(formats[fIdx].formatId, resolvedVariantUrl);
+          formats[fIdx].downloadUrl = resolvedVariantUrl;
           fIdx++;
         }
       }
@@ -155,6 +157,7 @@ export class HlsDashExtractor implements ExtractorContract {
         hasAudio: true,
         requiresMerge: false,
         protocol: 'm3u8_native',
+        downloadUrl: parsedUrl.toString(),
       };
       formats.push(fallbackFormat);
       urlTable.set(fallbackFormat.formatId, parsedUrl.toString());

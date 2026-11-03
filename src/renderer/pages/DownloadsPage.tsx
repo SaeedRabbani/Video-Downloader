@@ -5,12 +5,15 @@ import { DownloadCard } from '../components/DownloadCard';
 interface DownloadsPageProps {
   jobs: DownloadJob[];
   maxConcurrent: number;
+  onPauseJob: (jobId: string) => void;
+  onResumeJob: (jobId: string) => void;
   onCancelJob: (jobId: string) => void;
   onRetryJob: (jobId: string) => void;
   onRemoveJob: (jobId: string) => void;
   onOpenFile: (filePath: string) => void;
   onPreviewFile: (job: DownloadJob) => void;
   onOpenFolder: (filePath: string) => void;
+  onShowToast?: (text: string, type?: 'info' | 'error' | 'success') => void;
 }
 
 type JobFilter = 'all' | 'active' | 'completed' | 'failed';
@@ -18,12 +21,15 @@ type JobFilter = 'all' | 'active' | 'completed' | 'failed';
 export const DownloadsPage: React.FC<DownloadsPageProps> = ({
   jobs,
   maxConcurrent,
+  onPauseJob,
+  onResumeJob,
   onCancelJob,
   onRetryJob,
   onRemoveJob,
   onOpenFile,
   onPreviewFile,
   onOpenFolder,
+  onShowToast,
 }) => {
   const [filter, setFilter] = useState<JobFilter>('all');
 
@@ -36,6 +42,8 @@ export const DownloadsPage: React.FC<DownloadsPageProps> = ({
         j.state === 'queued' ||
         j.state === 'analyzing' ||
         j.state === 'downloading' ||
+        j.state === 'pausing' ||
+        j.state === 'paused' ||
         j.state === 'merging' ||
         j.state === 'converting' ||
         j.state === 'cancelling'
@@ -49,6 +57,8 @@ export const DownloadsPage: React.FC<DownloadsPageProps> = ({
         j.state === 'queued' ||
         j.state === 'analyzing' ||
         j.state === 'downloading' ||
+        j.state === 'pausing' ||
+        j.state === 'paused' ||
         j.state === 'merging' ||
         j.state === 'converting' ||
         j.state === 'cancelling'
@@ -66,7 +76,7 @@ export const DownloadsPage: React.FC<DownloadsPageProps> = ({
             Download Manager
           </h1>
           <p className="mt-1 text-xs text-slate-500 dark:text-slate-400 font-mono tabular-nums">
-            Queue Concurrency Limit: {maxConcurrent} simultaneous transfers · Active: {counts.active} · Downloaded: {counts.completed}
+            Queue Concurrency Limit: {maxConcurrent} simultaneous transfers · Active / Paused: {counts.active} · Downloaded: {counts.completed}
           </p>
         </div>
 
@@ -103,7 +113,7 @@ export const DownloadsPage: React.FC<DownloadsPageProps> = ({
               No download jobs match the selected filter
             </p>
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-              Queued, active, and downloaded files appear here with real-time progress telemetry.
+              Queued, active, paused, and downloaded files appear here with real-time progress telemetry.
             </p>
           </div>
         ) : (
@@ -111,12 +121,15 @@ export const DownloadsPage: React.FC<DownloadsPageProps> = ({
             <DownloadCard
               key={job.jobId}
               job={job}
+              onPause={onPauseJob}
+              onResume={onResumeJob}
               onCancel={onCancelJob}
               onRetry={onRetryJob}
               onRemove={onRemoveJob}
               onOpenFile={onOpenFile}
               onPreviewFile={onPreviewFile}
               onOpenFolder={onOpenFolder}
+              onShowToast={onShowToast}
             />
           ))
         )}

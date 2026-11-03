@@ -14,6 +14,8 @@ const electronAPI: ElectronPreloadApi = {
     ipcRenderer.invoke(IPC_CHANNELS.START_DOWNLOAD, request),
   bulkEnqueue: (request: BulkQueueRequest) =>
     ipcRenderer.invoke(IPC_CHANNELS.BULK_ENQUEUE, request),
+  pauseJob: (jobId: string) => ipcRenderer.invoke(IPC_CHANNELS.PAUSE_JOB, jobId),
+  resumeJob: (jobId: string) => ipcRenderer.invoke(IPC_CHANNELS.RESUME_JOB, jobId),
   cancelJob: (jobId: string) => ipcRenderer.invoke(IPC_CHANNELS.CANCEL_JOB, jobId),
   retryJob: (jobId: string) => ipcRenderer.invoke(IPC_CHANNELS.RETRY_JOB, jobId),
   removeJob: (jobId: string) => ipcRenderer.invoke(IPC_CHANNELS.REMOVE_JOB, jobId),

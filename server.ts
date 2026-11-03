@@ -128,6 +128,22 @@ async function startServer() {
   );
 
   app.post(
+    '/api/downloads/pause',
+    wrapRoute(async (req) => {
+      const jobId = typeof req.body?.jobId === 'string' ? req.body.jobId : '';
+      return await container.jobManager.pauseJob(jobId);
+    })
+  );
+
+  app.post(
+    '/api/downloads/resume',
+    wrapRoute(async (req) => {
+      const jobId = typeof req.body?.jobId === 'string' ? req.body.jobId : '';
+      return await container.jobManager.resumeJob(jobId);
+    })
+  );
+
+  app.post(
     '/api/downloads/cancel',
     wrapRoute(async (req) => {
       const jobId = typeof req.body?.jobId === 'string' ? req.body.jobId : '';

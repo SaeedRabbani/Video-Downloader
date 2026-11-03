@@ -164,8 +164,12 @@ describe('Progress Parsing & HLS Manifest Parsing', () => {
 });
 
 describe('Download Job State Machine Transitions', () => {
-  it('permits valid lifecycle transitions and blocks invalid transitions', () => {
+  it('permits valid lifecycle transitions including pause and resume and blocks invalid transitions', () => {
     expect(canTransitionJobState('queued', 'downloading')).toBe(true);
+    expect(canTransitionJobState('queued', 'paused')).toBe(true);
+    expect(canTransitionJobState('downloading', 'pausing')).toBe(true);
+    expect(canTransitionJobState('pausing', 'paused')).toBe(true);
+    expect(canTransitionJobState('paused', 'queued')).toBe(true);
     expect(canTransitionJobState('downloading', 'merging')).toBe(true);
     expect(canTransitionJobState('merging', 'completed')).toBe(true);
     expect(canTransitionJobState('failed', 'queued')).toBe(true); // Retry

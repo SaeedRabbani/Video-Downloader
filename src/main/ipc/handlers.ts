@@ -53,6 +53,14 @@ export function registerElectronIpcHandlers(
     return await container.jobManager.bulkEnqueueUrls(request);
   });
 
+  handleSecure(IPC_CHANNELS.PAUSE_JOB, async (jobId: string) => {
+    return await container.jobManager.pauseJob(jobId);
+  });
+
+  handleSecure(IPC_CHANNELS.RESUME_JOB, async (jobId: string) => {
+    return await container.jobManager.resumeJob(jobId);
+  });
+
   handleSecure(IPC_CHANNELS.CANCEL_JOB, async (jobId: string) => {
     return await container.jobManager.cancelJob(jobId);
   });

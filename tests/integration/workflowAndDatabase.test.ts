@@ -149,4 +149,46 @@ describe('End-to-End Vertical Slice: Analyze -> Select Format -> Download & Merg
       }
     }
   }, 25000);
+
+  it('pauses a queued or active download job and resumes it to completion', async () => {
+    const manifestUrl = `http://127.0.0.1:${serverPort}/local-media/observatory_broadcast.media.json`;
+    const analysis = await container.extractorEngine.analyzeUrl(manifestUrl);
+    expect(analysis.formats[0].downloadUrl).toContain('http://127.0.0.1:');
+
+    // Temporarily set concurrency to 1 and pause a newly queued job
+    const job = container.jobManager.enqueueDownload({
+      analysisId: analysis.analysisId,
+      url: manifestUrl,
+      formatId: '22-720p30-combined',
+      qualityPreset: '720p',
+      targetContainer: 'mp4',
+      convertAudioTo: 'none',
+      preserveOriginal: true,
+    });
+
+    expect(job.directDownloadUrl).toBeTruthy();
+
+    const paused = await container.jobManager.pauseJob(job.jobId);
+    expect(paused.state).toBe('paused');
+
+    const completionPromise = new Promise<DownloadJob>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Resume download timed out')), 20000);
+      container.jobManager.on('job-progress', (_evt, updatedJob: DownloadJob) => {
+        if (updatedJob.jobId === job.jobId && updatedJob.state === 'completed') {
+          clearTimeout(timeout);
+          resolve(updatedJob);
+        } else if (updatedJob.jobId === job.jobId && updatedJob.state === 'failed') {
+          clearTimeout(timeout);
+          reject(new Error(updatedJob.userErrorMessage || 'Resumed job failed'));
+        }
+      });
+    });
+
+    const resumed = await container.jobManager.resumeJob(job.jobId);
+    expect(resumed.state === 'queued' || resumed.state === 'downloading').toBe(true);
+
+    const completed = await completionPromise;
+    expect(completed.state).toBe('completed');
+    expect(completed.outputFilePath && fs.existsSync(completed.outputFilePath)).toBe(true);
+  }, 25000);
 });
